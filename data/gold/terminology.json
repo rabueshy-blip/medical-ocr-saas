@@ -1,0 +1,102 @@
+[
+  {
+    "id": "drug_name_ambiguity_metoprolol",
+    "raw_text": "يُعطى المريض ميتفوبرولين 50 ملغ مرتين يومياً للتحكم في ضغط الدم وتسارع نبضات القلب",
+    "expected_correction_terms": ["ميتوبرولول"],
+    "forbidden_terms": ["ميتفورمين"],
+    "expected_uncertain_terms": [],
+    "difficulty": "hard",
+    "tags": ["drug_ambiguity", "clinical_context"],
+    "note": "الكلمة المشوَّهة تتطابق تشابهياً مع دوائين مختلفين (ميتفورمين/ميتوبرولول)؛ السياق (ضغط الدم وتسارع النبض) يرجّح ميتوبرولول رغم أن ميتفورمين أقرب شكلياً."
+  },
+  {
+    "id": "digit_letter_confusion_omeprazole",
+    "raw_text": "يُنصح بتناول أوموبرازول 2O ملغ مرة يومياً قبل الإفطار بنصف ساعة",
+    "expected_correction_terms": ["أوموبرازول", "20"],
+    "forbidden_terms": ["2O"],
+    "expected_uncertain_terms": [],
+    "difficulty": "medium",
+    "tags": ["digit_letter_confusion"],
+    "note": "الحرف اللاتيني O بدل الرقم 0 خطأ OCR شائع؛ الجرعة الاعتيادية 20 ملغ مرة يومياً."
+  },
+  {
+    "id": "digit_letter_confusion_amoxicillin_dose",
+    "raw_text": "يصرف أموكسيسيلين 5oo ملغ كل 8 ساعات لمدة 7 أيام",
+    "expected_correction_terms": ["أموكسيسيلين", "500"],
+    "forbidden_terms": ["5oo"],
+    "expected_uncertain_terms": [],
+    "difficulty": "medium",
+    "tags": ["digit_letter_confusion"],
+    "note": "الحرفان o اللاتينيان بدل الصفرين في 500 — نمط جرعة معروف لأموكسيسيلين كل 8 ساعات."
+  },
+  {
+    "id": "frequency_handwriting_typo",
+    "raw_text": "أتورفاستاتين 20 ملغ مرتين يوميا",
+    "expected_correction_terms": ["أتورفاستاتين", "مرتين يومياً"],
+    "forbidden_terms": [],
+    "expected_uncertain_terms": [],
+    "difficulty": "easy",
+    "tags": ["typo", "frequency"],
+    "note": "'يوميا' بدون همزة وتنوين هي 'يومياً' مشوَّهة — يجب أن تُصحَّح لتطابق عبارة التكرار في القاموس المرجعي."
+  },
+  {
+    "id": "illegible_word_should_be_uncertain",
+    "raw_text": "المريض يتناول xxxxرول 40 ملغ صباحاً لعلاج التهاب المفاصل",
+    "expected_correction_terms": [],
+    "forbidden_terms": [],
+    "expected_uncertain_terms": ["xxxxرول"],
+    "difficulty": "hard",
+    "tags": ["illegible_handwriting", "hallucination_guard"],
+    "note": "اسم الدواء غير مقروء تماماً (رموز عشوائية). يجب ألا يخترع الموديل اسم دواء معروفاً ينتهي بصيغة مشابهة، بل يضع الكلمة ضمن uncertain_terms."
+  },
+  {
+    "id": "brand_name_not_in_dictionary",
+    "raw_text": "وصف الطبيب بانادول 500 ملغ عند اللزوم للصداع",
+    "expected_correction_terms": ["بانادول"],
+    "forbidden_terms": ["باراسيتامول"],
+    "expected_uncertain_terms": [],
+    "difficulty": "hard",
+    "tags": ["brand_vs_generic", "hallucination_guard"],
+    "note": "'بانادول' اسم تجاري غير موجود في القاموس المرجعي (الذي يحوي 'باراسيتامول' فقط). لا يوجد تطابق fuzzy قوي كافٍ، فيجب ألا يستبدله الموديل بالاسم العلمي من تلقاء نفسه."
+  },
+  {
+    "id": "diagnosis_ocr_noise_hypertension",
+    "raw_text": "التشخيص الأساسي: ارتفاع ضغط آلدم",
+    "expected_correction_terms": ["ارتفاع ضغط الدم"],
+    "forbidden_terms": [],
+    "expected_uncertain_terms": [],
+    "difficulty": "easy",
+    "tags": ["diagnosis", "ocr_noise"],
+    "note": "خلط بين 'ا' و'آ' في 'الدم' نتيجة OCR — يجب تصحيحها لتطابق عبارة التشخيص الكاملة في القاموس."
+  },
+  {
+    "id": "lab_term_english_ocr_noise",
+    "raw_text": "نتيجة تحليل Creatinin كانت ضمن الحدود الطبيعية",
+    "expected_correction_terms": ["Creatinine"],
+    "forbidden_terms": [],
+    "expected_uncertain_terms": [],
+    "difficulty": "easy",
+    "tags": ["lab_test", "english_ocr_noise"],
+    "note": "حرف e الأخير سقط أثناء OCR — يجب تصحيح المصطلح المخبري الإنجليزي لمطابقة القاموس."
+  },
+  {
+    "id": "unusual_but_clear_dose_no_second_guessing",
+    "raw_text": "يتناول المريض أتورفاستاتين 850 ملغ مساءً",
+    "expected_correction_terms": ["أتورفاستاتين", "850"],
+    "forbidden_terms": [],
+    "expected_uncertain_terms": [],
+    "difficulty": "hard",
+    "tags": ["restraint", "no_clinical_second_guessing"],
+    "note": "الرقم 850 مكتوب بوضوح تام (ليس خطأ OCR)، رغم أنه جرعة غير معتادة سريرياً لأتورفاستاتين. الموديول مخصَّص لتصحيح إملائي/OCR فقط، فيجب ألا يُغيّر رقماً واضحاً بحجة أنه يبدو غير معتاد سريرياً."
+  },
+  {
+    "id": "dense_paragraph_multiple_uncertain_terms",
+    "raw_text": "الأدوية الحالية: ###فين 500 ملغ صباحاً، @@@ستاتين 20 ملغ مساءً، وأخرى غير مقروءة تماماً",
+    "expected_correction_terms": [],
+    "forbidden_terms": ["ميتفورمين", "أتورفاستاتين"],
+    "expected_uncertain_terms": ["###فين", "@@@ستاتين"],
+    "difficulty": "hard",
+    "tags": ["dense_illegible", "multi_uncertain", "hallucination_guard"],
+    "note": "اسما دواءين مشوَّهان برموز عشوائية، بلاحقتين ('فين'، 'ستاتين') تُشبهان سطحياً ميتفورمين/أتورفاستاتين. يجب ألا يخمّن الموديل الاسمين اعتماداً على اللاحقة فقط، بل يضع كليهما ضمن uncertain_terms."
+  }
+]

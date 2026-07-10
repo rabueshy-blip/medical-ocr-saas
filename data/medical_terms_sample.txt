@@ -1,0 +1,30 @@
+# قائمة عيّنة مؤقتة (placeholder) لمصطلحات طبية بالعربية/الإنجليزية.
+# الغرض: تجربة خطوة Retrieve (fuzzy matching) في medical_ocr/terminology.py فقط.
+# يجب استبدالها بمرجع رسمي معتمد حسب اللغة المستهدفة قبل الإنتاج — انظر plan.md القسم 7.
+# الصيغة: term,term_type
+
+باراسيتامول,drug
+أموكسيسيلين,drug
+إيبوبروفين,drug
+ميتفورمين,drug
+أتورفاستاتين,drug
+أوموبرازول,drug
+ميتوبرولول,drug
+Paracetamol,drug
+Amoxicillin,drug
+Metformin,drug
+Atorvastatin,drug
+سكري النوع الثاني,diagnosis
+ارتفاع ضغط الدم,diagnosis
+الربو القصبي,diagnosis
+فشل كلوي مزمن,diagnosis
+Type 2 Diabetes,diagnosis
+Hypertension,diagnosis
+ملغ,dosage_unit
+مليلتر,dosage_unit
+مرة يومياً,frequency
+مرتين يومياً,frequency
+ثلاث مرات يومياً,frequency
+Hemoglobin,lab_test
+Creatinine,lab_test
+Glucose,lab_test

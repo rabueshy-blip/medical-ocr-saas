@@ -1,0 +1,45 @@
+"""
+هيكل FastAPI (اليوم الرابع، plan.md): يُغلّف موديولات DSPy (MedicalSpellingCorrector /
+MedicalTableStructurer) بنقاط HTTP، تمهيداً لربط الـ pipeline المُحسَّن لاحقاً
+بمرحلة Triage/الاستخراج الحقيقية (لم تُبنَ بعد).
+
+لا يفشل بدء تشغيل الخادم عند غياب ANTHROPIC_API_KEY — بدلاً من ذلك تُعطَّل
+النقاط التي تحتاج LM (503 برسالة واضحة عبر lm_guard.require_lm_configured)
+حتى لا يمنع غياب مفتاح تطوير محلي بقية الخادم (health check، وثائق OpenAPI) من
+العمل.
+"""
+
+from __future__ import annotations
+
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+
+from ..lm_config import configure_lm
+from .routers import spelling, tables
+from .schemas import HealthResponse
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        configure_lm()
+        app.state.lm_configured = True
+    except RuntimeError as exc:
+        logger.warning("LM لم يُهيَّأ عند بدء التشغيل: %s", exc)
+        app.state.lm_configured = False
+    yield
+
+
+app = FastAPI(title="Medical OCR — Reasoning Pipeline API", version="0.1.0", lifespan=lifespan)
+
+app.include_router(spelling.router)
+app.include_router(tables.router)
+
+
+@app.get("/health", response_model=HealthResponse)
+def health() -> HealthResponse:
+    return HealthResponse(status="ok", lm_configured=bool(app.state.lm_configured))
