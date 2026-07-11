@@ -53,9 +53,23 @@ class GoldDataset(BaseModel):
         return len(self.terminology) + len(self.tables)
 
 
+def _load_json_file(path: Path) -> list:
+    try:
+        raw_text = path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"ملف Gold Dataset غير موجود: {path}. تحقق من مسار data/gold/ "
+            "أو من تمرير gold_dir صحيح إلى load_gold_dataset()."
+        ) from exc
+    try:
+        return json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"ملف Gold Dataset تالف (JSON غير صالح): {path}") from exc
+
+
 def load_gold_dataset(gold_dir: Path = GOLD_DIR) -> GoldDataset:
-    terminology_raw = json.loads((gold_dir / "terminology.json").read_text(encoding="utf-8"))
-    tables_raw = json.loads((gold_dir / "tables.json").read_text(encoding="utf-8"))
+    terminology_raw = _load_json_file(gold_dir / "terminology.json")
+    tables_raw = _load_json_file(gold_dir / "tables.json")
     return GoldDataset(
         terminology=[GoldTerminologyExample(**item) for item in terminology_raw],
         tables=[GoldTableExample(**item) for item in tables_raw],

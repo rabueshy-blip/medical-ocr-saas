@@ -27,5 +27,13 @@ class TestMedicalTerminologyRetriever(unittest.TestCase):
         self.assertEqual(self.retriever.suggest(""), [])
 
 
+class TestMedicalTerminologyRetrieverMissingFile(unittest.TestCase):
+    def test_raises_clear_error_when_file_missing(self):
+        missing_path = Path(__file__).resolve().parent / "does_not_exist.txt"
+        with self.assertRaises(FileNotFoundError) as ctx:
+            MedicalTerminologyRetriever.from_file(missing_path)
+        self.assertIn(str(missing_path), str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

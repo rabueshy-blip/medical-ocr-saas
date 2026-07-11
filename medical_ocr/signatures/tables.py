@@ -7,14 +7,21 @@ Signature الثاني (plan.md القسم 6): هيكلة وتصحيح صفوف/
 `row_count_preserved` + `dspy.Refine` (إعادة محاولة حتى N مرات حتى يتحقق الشرط)،
 وليس مجرد تعليمة نصية. ملاحظة: `dspy.Suggest`/`dspy.Assert` غير متوفرين في إصدار
 dspy المُثبَّت هنا (2.6.27)؛ `dspy.Refine` هو البديل المكافئ الحالي.
+
+بوابة إضافية لحماية الرموز الطبية (اليوم السادس): `row_values_grounded` تمنع
+تغيير قيمة رقمية واضحة (نتيجة مخبرية/جرعة) ضمن صف لم يُعلَّم UNCERTAIN — لأن
+`row_count_preserved` وحدها تتحقق فقط من عدد الصفوف، لا من سلامة قيمها.
 """
 
 from __future__ import annotations
 
 import json
+from collections import Counter
 from typing import List, Optional
 
 import dspy
+
+from ..numeric_guard import extract_pure_numbers
 
 
 class MedicalTableStructuring(dspy.Signature):
@@ -58,13 +65,41 @@ def row_count_preserved(raw_rows: List[List[str]], structured_rows_json: str) ->
     return isinstance(structured, list) and len(structured) == len(raw_rows)
 
 
+def structured_row_text(row: object) -> str:
+    """يحوّل صفاً مُهيكَلاً (dict بمفاتيح أعمدة أو قيمة أخرى) إلى نص واحد للمقارنة/البحث."""
+    return " ".join(str(value) for value in row.values()) if isinstance(row, dict) else str(row)
+
+
+def row_values_grounded(raw_rows: List[List[str]], structured_rows_json: str) -> bool:
+    """بوابة حماية الرموز الطبية (اليوم السادس): تمنع تغيير قيمة رقمية واضحة
+    (نتيجة مخبرية/جرعة) ضمن صف لم يُعلَّم UNCERTAIN بالكامل.
+
+    `row_count_preserved` تتحقق فقط من عدد الصفوف، لا من سلامة قيمها — صف قد
+    يُعاد ترتيب أعمدته دون حذف/دمج لكن بقيمة رقمية مُستبدَلة بأخرى، وهذا ما
+    تكتشفه هذه البوابة. صف فيه أي خلية UNCERTAIN يُستثنى عمداً من هذا الفحص
+    لأن فقدان رقمه الأصلي متوقَّع ومقصود في تلك الحالة.
+    """
+    if not row_count_preserved(raw_rows, structured_rows_json):
+        return False
+    structured_rows = json.loads(structured_rows_json)
+    for raw_row, structured_row in zip(raw_rows, structured_rows):
+        structured_text = structured_row_text(structured_row)
+        if "UNCERTAIN" in structured_text.upper():
+            continue
+        raw_numbers = Counter(extract_pure_numbers(" ".join(cell or "" for cell in raw_row)))
+        structured_numbers = Counter(extract_pure_numbers(structured_text))
+        if any(structured_numbers[number] < count for number, count in raw_numbers.items()):
+            return False
+    return True
+
+
 def table_row_count_reward(call_kwargs: dict, prediction: dspy.Prediction) -> float:
-    """reward_fn لـ dspy.Refine: 1.0 إن حافظت الهيكلة على عدد الصفوف الأصلي، وإلا 0.0."""
+    """reward_fn لـ dspy.Refine: 1.0 إن حافظت الهيكلة على عدد الصفوف الأصلي وقيمها الرقمية، وإلا 0.0."""
     try:
         original_rows = json.loads(call_kwargs["raw_rows"])
     except (json.JSONDecodeError, TypeError):
         return 0.0
-    return 1.0 if row_count_preserved(original_rows, prediction.structured_rows) else 0.0
+    return 1.0 if row_values_grounded(original_rows, prediction.structured_rows) else 0.0
 
 
 class MedicalTableStructurer(dspy.Module):

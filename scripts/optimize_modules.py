@@ -34,9 +34,8 @@ from medical_ocr.gold_metrics import table_metric, terminology_metric
 from medical_ocr.lm_config import configure_lm
 from medical_ocr.signatures.spelling import MedicalSpellingCorrector
 from medical_ocr.signatures.tables import MedicalTableStructurer
-from medical_ocr.terminology import MedicalTerminologyRetriever
+from medical_ocr.terminology import DEFAULT_TERMS_PATH, MedicalTerminologyRetriever
 
-TERMS_PATH = Path(__file__).resolve().parent.parent / "data" / "medical_terms_sample.txt"
 OPTIMIZED_DIR = Path(__file__).resolve().parent / "optimized"
 RESULTS_PATH = Path(__file__).resolve().parent / "optimize_results.json"
 
@@ -51,7 +50,7 @@ def _score_devset(program: dspy.Module, devset: list, metric) -> float:
 
 
 def optimize_terminology() -> dict:
-    terminology = MedicalTerminologyRetriever.from_file(TERMS_PATH)
+    terminology = MedicalTerminologyRetriever.from_file(DEFAULT_TERMS_PATH)
     devset_all = build_terminology_devset(load_gold_dataset())
     trainset, devset = devset_all[:TERMINOLOGY_TRAIN_SIZE], devset_all[TERMINOLOGY_TRAIN_SIZE:]
 

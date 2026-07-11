@@ -17,6 +17,10 @@ from typing import List, Union
 
 from rapidfuzz import fuzz, process
 
+# مسار افتراضي واحد للقاموس المرجعي (اليوم السادس: كان مكرَّراً بصيغ مختلفة في
+# medical_ocr/api/dependencies.py وثلاث سكربتات تحت scripts/).
+DEFAULT_TERMS_PATH = Path(__file__).resolve().parent.parent / "data" / "medical_terms_sample.txt"
+
 
 @dataclass(frozen=True)
 class TermEntry:
@@ -40,8 +44,18 @@ class MedicalTerminologyRetriever:
 
     @classmethod
     def from_file(cls, path: Union[str, Path]) -> "MedicalTerminologyRetriever":
+        resolved_path = Path(path)
+        try:
+            raw_text = resolved_path.read_text(encoding="utf-8")
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                f"قاموس المصطلحات الطبية غير موجود في المسار: {resolved_path}. "
+                "تحقق من مسار الملف، أو راجع القسم 7 من plan.md بخصوص استبدال "
+                "العيّنة المؤقتة بمرجع رسمي."
+            ) from exc
+
         entries: List[TermEntry] = []
-        for line in Path(path).read_text(encoding="utf-8").splitlines():
+        for line in raw_text.splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue

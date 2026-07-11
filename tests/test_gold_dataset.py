@@ -4,6 +4,7 @@
 """
 
 import unittest
+from pathlib import Path
 
 from medical_ocr.gold_dataset import (
     build_table_devset,
@@ -43,6 +44,14 @@ class TestGoldDataset(unittest.TestCase):
         case = next(e for e in self.gold.terminology if e.id == "drug_name_ambiguity_metoprolol")
         self.assertIn("ميتفورمين", case.forbidden_terms)
         self.assertIn("ميتوبرولول", case.expected_correction_terms)
+
+
+class TestLoadGoldDatasetMissingDir(unittest.TestCase):
+    def test_raises_clear_error_when_gold_dir_missing(self):
+        missing_dir = Path(__file__).resolve().parent / "no_such_gold_dir"
+        with self.assertRaises(FileNotFoundError) as ctx:
+            load_gold_dataset(gold_dir=missing_dir)
+        self.assertIn("terminology.json", str(ctx.exception))
 
 
 class TestGoldDevsetBuilders(unittest.TestCase):

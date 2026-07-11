@@ -50,6 +50,17 @@ class TestTerminologyMetric(unittest.TestCase):
         )
         self.assertEqual(terminology_metric(example, prediction), 0.0)
 
+    def test_hallucinated_dosage_number_scores_zero(self):
+        # الرقم 50 صريح وصحيح في raw_text؛ تغييره إلى 500 هلوسة جرعة خطيرة يجب
+        # أن تُفشل الدرجة كاملة رغم بقاء بقية النص شبه مطابق.
+        example = _terminology_example()
+        prediction = dspy.Prediction(
+            corrected_text="يُعطى المريض ميتوبرولول 500 ملغ مرتين يومياً",
+            corrections="[]",
+            uncertain_terms="[]",
+        )
+        self.assertEqual(terminology_metric(example, prediction), 0.0)
+
     def test_uncertain_term_correctly_flagged_scores_high(self):
         example = _terminology_example(
             expected_correction_terms=[],
@@ -90,6 +101,17 @@ class TestTableMetric(unittest.TestCase):
         example = _table_example()
         prediction = dspy.Prediction(
             structured_rows='[{"الدواء": "أموكسيسيلين", "الجرعة": "500 ملغ"}]',
+            notes="[]",
+        )
+        self.assertEqual(table_metric(example, prediction), 0.0)
+
+    def test_hallucinated_lab_value_scores_zero(self):
+        # "500 ملغ" في raw_rows تحوّلت إلى "50 ملغ" في الصف المُهيكَل دون أن
+        # يُعلَّم الصف UNCERTAIN — تغيير جرعة صريحة يجب أن يُفشل الدرجة كاملة.
+        example = _table_example()
+        prediction = dspy.Prediction(
+            structured_rows='[{"الدواء": "الدواء", "الجرعة": "الجرعة"}, '
+            '{"الدواء": "أموكسيسيلين", "الجرعة": "50 ملغ"}]',
             notes="[]",
         )
         self.assertEqual(table_metric(example, prediction), 0.0)

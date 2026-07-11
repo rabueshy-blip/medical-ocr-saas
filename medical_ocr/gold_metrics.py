@@ -6,10 +6,11 @@
 - scripts/evaluate_gold.py: قياس الدقة عبر dspy.Evaluate.
 - scripts/optimize_modules.py: دالة الهدف (metric) لمُحسِّن dspy.BootstrapFewShot.
 
-المبدأ: القيد البرمجي لمنع الهلوسة (is_correction_grounded / row_count_preserved،
-القسم 2 من plan.md) بوابة صارمة أولاً (0.0 عند الفشل)، ثم درجة جزئية بحسب مطابقة
-المصطلحات/الخلايا المتوقعة عبر fuzzy matching — وليس مطابقة نصية حرفية، لأن صياغة
-الموديل قد تختلف شكلياً عن الصياغة المرجعية دون أن تكون خاطئة.
+المبدأ: القيد البرمجي لمنع الهلوسة (is_correction_grounded / row_values_grounded،
+القسم 2 من plan.md، مع بوابة حماية الأرقام/الرموز الطبية المضافة في اليوم السادس)
+بوابة صارمة أولاً (0.0 عند الفشل)، ثم درجة جزئية بحسب مطابقة المصطلحات/الخلايا
+المتوقعة عبر fuzzy matching — وليس مطابقة نصية حرفية، لأن صياغة الموديل قد تختلف
+شكلياً عن الصياغة المرجعية دون أن تكون خاطئة.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import dspy
 from rapidfuzz import fuzz
 
 from .signatures.spelling import is_correction_grounded
-from .signatures.tables import row_count_preserved
+from .signatures.tables import row_values_grounded, structured_row_text
 
 FUZZY_CONTAINS_THRESHOLD = 80.0
 
@@ -77,7 +78,7 @@ def table_metric(example: dspy.Example, prediction: dspy.Prediction, trace: Any 
     """
     structured_rows_json = getattr(prediction, "structured_rows", "") or ""
 
-    if not row_count_preserved(example.raw_rows, structured_rows_json):
+    if not row_values_grounded(example.raw_rows, structured_rows_json):
         return 0.0
 
     try:
@@ -91,8 +92,7 @@ def table_metric(example: dspy.Example, prediction: dspy.Prediction, trace: Any 
         row_index = int(row_index_str)
         if row_index >= len(structured_rows) or not expected_values:
             continue
-        row = structured_rows[row_index]
-        row_text = " ".join(str(v) for v in row.values()) if isinstance(row, dict) else str(row)
+        row_text = structured_row_text(structured_rows[row_index])
         hits = sum(_fuzzy_contains(row_text, value) for value in expected_values)
         scores.append(hits / len(expected_values))
 
@@ -100,8 +100,7 @@ def table_metric(example: dspy.Example, prediction: dspy.Prediction, trace: Any 
         if row_index >= len(structured_rows):
             scores.append(0.0)
             continue
-        row = structured_rows[row_index]
-        row_text = " ".join(str(v) for v in row.values()) if isinstance(row, dict) else str(row)
+        row_text = structured_row_text(structured_rows[row_index])
         scores.append(1.0 if "UNCERTAIN" in row_text.upper() else 0.0)
 
     return round(sum(scores) / len(scores), 4) if scores else 1.0

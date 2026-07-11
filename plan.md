@@ -112,6 +112,58 @@ Document
 - اختبارات دخان جديدة بدون LM حقيقي (`tests/test_gold_dataset.py`, `tests/test_gold_metrics.py`) — المجموع الآن 50 اختباراً، كلها ناجحة.
 - **التالي:** بمجرد توفر مفتاح Anthropic API، تشغيل `scripts/evaluate_gold.py` (خط أساس قبل أي تحسين) ثم `scripts/optimize_modules.py`، ومراجعة الفرق قبل/بعد يدوياً. لاحقاً: توسعة القاموس المرجعي (لا يزال placeholder، القسم 7) والنظر في زيادة حجم Gold Dataset إن أظهر التقييم الأول ثغرات غير مغطاة.
 
+## 12. اليوم السادس — المرحلة 4: تنظيف الكود، معالجة الأخطاء، وحماية الرموز الطبية من الهلوسة
+
+- **ثغرة حماية مكتشفة ومُعالَجة (الأهم ✅):** بوابتا الترسيخ القائمتين حتى نهاية اليوم الخامس
+  (`is_correction_grounded` عبر تشابه نصي كلي + فرق عدد كلمات، و`row_count_preserved` عبر عدد
+  الصفوف فقط) لا تلتقطان تحديداً حالة تغيّر **رقم صريح واحد** (جرعة دواء أو قيمة مخبرية) بينما
+  يبقى التشابه العام أو عدد الصفوف/الكلمات كما هو — وهي بالضبط أخطر أنواع الهلوسة الطبية (مثال:
+  عيّنة Gold Dataset الحالية "850 ملغ" كانت تُقاس بدرجة جزئية فقط، لا كبوابة رفض صارمة).
+  - `medical_ocr/numeric_guard.py` (جديد): `extract_pure_numbers()` — يستخرج الأرقام الصريحة
+    الصرفة فقط (محاطة بحدود غير حرفية)، ويستثني عمداً رموز التباس OCR الملتصقة بحروف (مثل
+    `2O`، `5oo`) لأن تصحيح تلك إلى رقم مقروء هو الغرض المقصود من الموديولات وليس هلوسة. وحدة
+    مشتركة بين مسار النص والجداول لتفادي ازدواج نفس التعريف الدقيق لـ"الرقم الصريح".
+  - `medical_ocr/signatures/spelling.py`: `numeric_tokens_preserved()` بوابة جديدة مدموجة داخل
+    `is_correction_grounded` (تُستخدم تلقائياً في كل من `dspy.Refine` أثناء التوليد وفي
+    `gold_metrics.terminology_metric` أثناء التقييم) — ترفض أي تصحيح يُغيّر رقماً صريحاً
+    موجوداً في raw_text دون منع تصحيح التباس حرف/رقم.
+  - `medical_ocr/signatures/tables.py`: `row_values_grounded()` بوابة جديدة (تُستخدم في
+    `table_row_count_reward` بدل `row_count_preserved` وحدها) تمنع تغيير قيمة رقمية واضحة ضمن
+    صف لم يُعلَّم UNCERTAIN بالكامل؛ الصفوف التي تحوي أي خلية UNCERTAIN تُستثنى عمداً من هذا
+    الفحص لأن فقدان الرقم الأصلي فيها متوقَّع ومقصود. أُضيفت أيضاً `structured_row_text()`
+    (نقل منطق تحويل صف مُهيكَل إلى نص واحد، كان مكرَّراً مرتين داخل `gold_metrics.py`).
+  - `medical_ocr/gold_metrics.py`: `table_metric` يستخدم الآن `row_values_grounded` كبوابة
+    صارمة بدل `row_count_preserved` وحدها؛ `terminology_metric` يستفيد تلقائياً من التحديث عبر
+    `is_correction_grounded`.
+- **معالجة الأخطاء (مكتمل ✅):**
+  - `medical_ocr/terminology.py::MedicalTerminologyRetriever.from_file`: رسالة خطأ عربية واضحة
+    (تتضمن المسار الكامل وإشارة لقسم 7 من الخطة) بدل `FileNotFoundError` عام غير مفسَّر.
+  - `medical_ocr/gold_dataset.py::load_gold_dataset`: دالة `_load_json_file` داخلية مشتركة —
+    رسالة واضحة تحدد أي ملف من الاثنين (`terminology.json`/`tables.json`) مفقود أو تالف
+    (`json.JSONDecodeError` تُعاد كـ `ValueError` برسالة تحدد اسم الملف).
+- **تنظيف الكود (مكتمل ✅):**
+  - مسار قاموس المصطلحات (`data/medical_terms_sample.txt`) كان مُعرَّفاً بصيغ مختلفة مكرَّرة
+    أربع مرات (`medical_ocr/api/dependencies.py` وثلاث سكربتات تحت `scripts/`) — تم توحيده في
+    ثابت واحد `medical_ocr.terminology.DEFAULT_TERMS_PATH` واستُبدلت كل نسخة مكرَّرة به.
+  - إزالة ازدواج تحويل "صف مُهيكَل -> نص" (كان مكرَّراً حرفياً مرتين في `gold_metrics.py`) عبر
+    `structured_row_text()` المشتركة في `medical_ocr/signatures/tables.py`.
+  - تحقّق يدوي (بحث AST عن الاستيرادات غير المستخدمة) على كل الملفات المعدَّلة: لا استيرادات
+    ميتة متبقية.
+- **اختبارات جديدة (مكتمل ✅):** `tests/test_numeric_guard.py` (جديد)، إضافات إلى
+  `tests/test_signatures.py` (`TestNumericTokensPreserved`، `TestRowValuesGrounded`، حالتا
+  تغيّر جرعة صريحة/عدم منع تصحيح OCR رقمي داخل `TestIsCorrectionGrounded`)، إضافات إلى
+  `tests/test_gold_metrics.py` (حالة هلوسة جرعة نصية وحالة هلوسة قيمة مخبرية جدولية)، وإضافات
+  إلى `tests/test_terminology.py`/`tests/test_gold_dataset.py` لرسائل الخطأ الجديدة عند غياب
+  الملفات. المجموع الآن 68 اختباراً (كان 50 نهاية اليوم الخامس)، كلها ناجحة، دون أي LM حقيقي.
+- **مراجعة شاملة (مكتمل ✅):** قراءة كاملة لكل ملفات `medical_ocr/`، `medical_ocr/api/`،
+  `scripts/`، و`tests/` (لا يوجد diff غير ملتزم قبل البدء — الفرع نظيف)، للتحقق من الربط
+  الشامل بين وحدات Schema/Chunking/Terminology/Signatures/Gold Dataset/Metrics/API. لم تُكتشف
+  ثغرات إضافية بخلاف بوابة الأرقام أعلاه.
+- **التالي:** بمجرد توفر مفتاح Anthropic API لأول مرة — تشغيل `scripts/run_hard_cases.py` ثم
+  `scripts/evaluate_gold.py` (خط الأساس الحقيقي الأول، والآن مع بوابة حماية الأرقام الجديدة)
+  ثم `scripts/optimize_modules.py`، ومراجعة الفرق قبل/بعد. توسعة القاموس المرجعي (لا يزال
+  عيّنة مؤقتة) تبقى بنداً مفتوحاً كما في القسم 7.
+
 ## 10. اليوم الرابع — دمج موديولات التفكير وتطوير دقة الاستخراج العالية
 
 - **تكوين LM فعلي (جزئياً مكتمل ✅، بانتظار مفتاح API):**

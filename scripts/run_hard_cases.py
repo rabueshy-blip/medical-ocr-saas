@@ -23,9 +23,8 @@ from medical_ocr.eval_cases import TABLE_CASES, TERMINOLOGY_CASES
 from medical_ocr.lm_config import configure_lm
 from medical_ocr.signatures.spelling import MedicalSpellingCorrector
 from medical_ocr.signatures.tables import MedicalTableStructurer
-from medical_ocr.terminology import MedicalTerminologyRetriever
+from medical_ocr.terminology import DEFAULT_TERMS_PATH, MedicalTerminologyRetriever
 
-TERMS_PATH = Path(__file__).resolve().parent.parent / "data" / "medical_terms_sample.txt"
 RESULTS_PATH = Path(__file__).resolve().parent / "hard_case_results.json"
 
 
@@ -77,7 +76,7 @@ def run_table_cases(structurer: MedicalTableStructurer) -> list:
 
 def main() -> None:
     configure_lm()
-    terminology = MedicalTerminologyRetriever.from_file(TERMS_PATH)
+    terminology = MedicalTerminologyRetriever.from_file(DEFAULT_TERMS_PATH)
     corrector = MedicalSpellingCorrector(terminology=terminology)
     structurer = MedicalTableStructurer()
 
