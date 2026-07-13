@@ -19,7 +19,7 @@ from typing import Optional
 import dspy
 from dotenv import load_dotenv
 
-DEFAULT_MODEL = "gemini/gemini-2.5-flash"
+DEFAULT_MODEL = "gemini/gemini-3-flash-preview"
 
 
 def configure_lm(model: Optional[str] = None, **lm_kwargs) -> dspy.LM:
