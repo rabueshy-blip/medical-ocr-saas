@@ -4,7 +4,7 @@
 الاكتفاء ببنية الموديول.
 
 الاستخدام:
-    ANTHROPIC_API_KEY=sk-ant-... .venv/bin/python scripts/run_hard_cases.py
+    GEMINI_API_KEY=... .venv/bin/python scripts/run_hard_cases.py
 أو ضع المفتاح في ملف .env في جذر المشروع.
 
 يطبع لكل حالة: النص/الجدول الخام، حقل reasoning (تفكير CoT الفعلي)، والمخرجات،

@@ -63,7 +63,11 @@ Document
 - `easyocr` — محرك OCR ثانٍ للتحقق المزدوج (الطبقة 2)، **بديل عن `pytesseract`/`tesseract-ocr`** لأن الأخير يتطلب تثبيت ثنائي نظام غير متاح بدون Homebrew.
 - `rapidfuzz` — مقارنة/diff بين نتائج المحركين، وربط تصحيح الإملاء الطبي بالقاموس المرجعي (خطوة Retrieve).
 - `dspy-ai`
-- `anthropic` — عميل API لنموذج Vision (Claude) كمصحح مقيّد.
+- ~~`anthropic` — عميل API لنموذج Vision (Claude) كمصحح مقيّد.~~ **استُبدل (اليوم السابع،
+  2026-07-13) بـ Gemini عبر Google AI Studio** (مجاني، بدون بطاقة دفع)، يُستدعى مباشرة عبر
+  `litellm` (اعتمادية موجودة أصلاً ضمن `dspy-ai`) بصيغة `gemini/gemini-2.5-flash` — لا حاجة
+  لحزمة SDK منفصلة، وتمت إزالة `anthropic` من `requirements.txt`. راجع
+  `medical_ocr/lm_config.py` والقسم 13 (اليوم السابع) للتفاصيل.
 - `streamlit` — واجهة المستخدم.
 - `opencv-python-headless`, `numpy`, `pandas`, `Pillow` — اعتماديات مساعدة لمحركات OCR ومعالجة الصور.
 - قاموس/مرجع مصطلحات طبية (يُحدَّد لاحقاً حسب اللغة المستهدفة)
@@ -197,11 +201,39 @@ Document
     حقيقي** — هذا القيد لم يتغيّر منذ اليوم الرابع.
 - **رفع الكود المستقر (مكتمل ✅):** commit جديد يضم التوثيق الجديد، ثم `git push` إلى
   `origin/main` على GitHub.
-- **التالي:** الحصول على مفتاح Anthropic API فعلي يبقى الحاجز الأهم أمام أي عرض تجريبي حي
-  كامل (وليس بنيوياً فقط) — بمجرد توفره: `scripts/run_hard_cases.py` ثم
-  `scripts/evaluate_gold.py` ثم `scripts/optimize_modules.py`، ثم إعادة اختبار نقاط API
-  فعلياً بردود حقيقية قبل أي عرض للأطباء. لاحقاً: بناء مرحلة Triage ومساري الاستخراج
-  (الخطوات 2-5 من القسم 8) ليصبح العرض على مستوى "ارفع PDF" لا "مرّر نصاً يدوياً" فقط.
+- **التالي (محدَّث، انظر القسم 14):** الحاجز لم يعد "الحصول على مفتاح Anthropic API" بل
+  الحصول على مفتاح Gemini المجاني من Google AI Studio — تم التبديل الكامل للمزوّد بعد نهاية
+  اليوم السابع مباشرة (القسم 14) لتفادي الحاجة لمفتاح مدفوع أصلاً.
+
+## 14. ملحق اليوم السابع — التبديل من Anthropic إلى Google Gemini (مجاني)
+
+- **السبب:** لم يتوفر مفتاح Anthropic API مدفوع في هذه البيئة، بينما يوفّر Google AI Studio
+  مستوى مجانياً فعلياً (free tier) دون بطاقة دفع — يسمح بتشغيل العرض التجريبي فعلياً ضد LM
+  حقيقي بدون تكلفة، وهو ما كان يمنع أي تشغيل حقيقي منذ اليوم الرابع.
+- **التغيير التقني (مكتمل ✅):** `dspy.LM` يدعم Gemini مباشرة عبر `litellm` (اعتمادية موجودة
+  أصلاً ضمن `dspy-ai`، تم التحقق فعلياً بإنشاء `dspy.LM("gemini/gemini-2.5-flash")` بنجاح) —
+  **لا حاجة لأي حزمة SDK إضافية**. تم تعديل:
+  - `medical_ocr/lm_config.py`: `DEFAULT_MODEL = "gemini/gemini-2.5-flash"`، والتحقق الآن من
+    `GEMINI_API_KEY` (أو `GOOGLE_API_KEY` كبديل يدعمه litellm) بدل `ANTHROPIC_API_KEY`.
+  - `medical_ocr/api/lm_guard.py`, `medical_ocr/api/app.py`: رسائل الخطأ/التعليقات محدَّثة لذكر
+    `GEMINI_API_KEY`.
+  - `requirements.txt`: أُزيلت `anthropic` (لم تكن مستوردة مباشرة في أي مكان من الكود أصلاً —
+    تحقّق عبر بحث `import anthropic` لم يُطابق شيئاً).
+  - `.env.example`, `README.md`: محدَّثان بالكامل ليذكرا `GEMINI_API_KEY` ورابط الحصول على
+    مفتاح مجاني (`https://aistudio.google.com/apikey`) بدل Anthropic.
+  - `scripts/run_hard_cases.py`, `scripts/evaluate_gold.py`, `scripts/optimize_modules.py`:
+    أسطر الاستخدام التوضيحية محدَّثة إلى `GEMINI_API_KEY=...`.
+  - `tests/test_lm_config.py`, `tests/test_api.py`: محدَّثان لتوقّع رسالة `GEMINI_API_KEY` بدل
+    `ANTHROPIC_API_KEY` — أُعيد تشغيل كامل مجموعة الاختبارات (69 اختباراً) بعد التعديل وكلها
+    ناجحة، دون أي LM حقيقي.
+  - القسم 7 أعلاه (الاعتماديات) محدَّث بشطب `anthropic` وتوثيق البديل.
+- **لم يتغيّر:** مبدأ منع الهلوسة والبوابات البرمجية (`is_correction_grounded`,
+  `row_values_grounded`, `numeric_guard.py`) مستقلة تماماً عن مزوّد LM المستخدم — تعمل بنفس
+  الصرامة بغضّ النظر عن كون النموذج Gemini أو Claude.
+- **التالي الفعلي الآن:** الحصول على مفتاح Gemini مجاني من
+  https://aistudio.google.com/apikey ووضعه في `.env`، ثم تشغيل
+  `scripts/run_hard_cases.py` (أول تشغيل حقيقي فعلي في تاريخ المشروع) فمراجعة جودة `reasoning`
+  يدوياً، ثم `scripts/evaluate_gold.py` كخط أساس كمّي، ثم `scripts/optimize_modules.py`.
 
 ## 10. اليوم الرابع — دمج موديولات التفكير وتطوير دقة الاستخراج العالية
 

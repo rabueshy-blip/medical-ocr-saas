@@ -29,9 +29,13 @@ Micro-SaaS يستخرج النصوص والجداول من ملفات PDF الط
 تلقائياً لم يُبنَ بعد**. العرض التجريبي الحالي هو على مستوى **API لموديولات التصحيح
 نفسها** (تُمرَّر نصوص/جداول خام يدوياً)، وليس على مستوى "ارفع ملف PDF".
 
-**قيد حرج آخر:** لا يوجد حتى الآن `ANTHROPIC_API_KEY` فعلي في بيئة التطوير، لذلك **لم يُشغَّل
+**نموذج اللغة المستخدم:** Gemini عبر Google AI Studio (مجاني بالكامل، بدون بطاقة دفع) —
+`gemini/gemini-2.5-flash` افتراضياً عبر `litellm`/`dspy.LM`، بديلاً عن Anthropic الذي كان
+يتطلب مفتاحاً مدفوعاً. احصل على مفتاح مجاني من https://aistudio.google.com/apikey.
+
+**قيد حرج آخر:** لا يوجد حتى الآن `GEMINI_API_KEY` فعلي في بيئة التطوير، لذلك **لم يُشغَّل
 أي موديول DSPy فعلياً ضد نموذج حقيقي بعد** — كل ما سبق مُختبر بنيوياً (smoke tests) فقط. أي
-عرض تجريبي حي (live demo) لتصحيح فعلي يتطلب أولاً الحصول على مفتاح Anthropic API صالح.
+عرض تجريبي حي (live demo) لتصحيح فعلي يتطلب أولاً إضافة المفتاح المجاني إلى `.env`.
 
 ## القيود البيئية
 
@@ -50,7 +54,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 cp .env.example .env
-# ثم عبّئ ANTHROPIC_API_KEY داخل .env (لا يُرفع أبداً — مُستثنى في .gitignore)
+# ثم عبّئ GEMINI_API_KEY داخل .env (مجاني من https://aistudio.google.com/apikey — لا يُرفع أبداً، مُستثنى في .gitignore)
 ```
 
 ## تشغيل الاختبارات
@@ -69,7 +73,7 @@ cp .env.example .env
 
 - `GET /health` — فحص الحالة (يعمل حتى بدون مفتاح API، ويُظهر `lm_configured: false` إن غاب).
 - `GET /docs` — واجهة Swagger التفاعلية؛ أسهل طريقة لعرض النقاط للأطباء/المترجمين دون كتابة كود.
-- `POST /correct-spelling` — يتطلب `ANTHROPIC_API_KEY` فعلي، وإلا يرجع `503` برسالة عربية واضحة.
+- `POST /correct-spelling` — يتطلب `GEMINI_API_KEY` فعلي، وإلا يرجع `503` برسالة عربية واضحة.
 - `POST /structure-table` — نفس الشرط.
 
 مثال طلب (بعد توفر مفتاح API فعلي):

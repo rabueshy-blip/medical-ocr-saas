@@ -13,8 +13,8 @@ rapidfuzz
 # --- DSPy وموديولات التصحيح ---
 dspy-ai
 
-# --- عميل Vision LLM (Claude) ---
-anthropic
+# --- Vision LLM: Gemini عبر Google AI Studio (مجاني)، يُستدعى عبر litellm
+# (اعتمادية ضمن dspy-ai مباشرةً) بصيغة "gemini/<model>" — لا حاجة لحزمة SDK إضافية ---
 python-dotenv
 
 # --- واجهة المستخدم ---

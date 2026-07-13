@@ -11,7 +11,7 @@ def require_lm_configured(request: Request) -> None:
         raise HTTPException(
             status_code=503,
             detail=(
-                "LM غير مُهيَّأ: لا يوجد ANTHROPIC_API_KEY في بيئة الخادم. "
+                "LM غير مُهيَّأ: لا يوجد GEMINI_API_KEY في بيئة الخادم. "
                 "أضِفه إلى .env وأعد تشغيل الخادم."
             ),
         )

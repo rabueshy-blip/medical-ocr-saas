@@ -7,7 +7,7 @@ MedicalTableStructurer) كمّياً مقابل Gold Dataset (data/gold/)، بد
 هلوسة صارمة أولاً، ثم درجة جزئية بحسب مطابقة المصطلحات/الخلايا المتوقعة).
 
 الاستخدام:
-    ANTHROPIC_API_KEY=sk-ant-... .venv/bin/python scripts/evaluate_gold.py
+    GEMINI_API_KEY=... .venv/bin/python scripts/evaluate_gold.py
 أو ضع المفتاح في ملف .env في جذر المشروع.
 
 يطبع متوسط الدرجة لكل مجموعة (مصطلحات/جداول) ولكل عيّنة على حدة، ويحفظ تفصيلاً

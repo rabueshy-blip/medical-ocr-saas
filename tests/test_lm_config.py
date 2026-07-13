@@ -15,7 +15,7 @@ class TestConfigureLmWithoutKey(unittest.TestCase):
     def test_raises_clear_error_when_api_key_missing(self):
         with self.assertRaises(RuntimeError) as ctx:
             configure_lm()
-        self.assertIn("ANTHROPIC_API_KEY", str(ctx.exception))
+        self.assertIn("GEMINI_API_KEY", str(ctx.exception))
 
 
 if __name__ == "__main__":

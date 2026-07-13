@@ -12,7 +12,7 @@ MIPROv2 (الذي يستهدف أساساً مجموعات بيانات أكبر
 لتفادي أي تسريب بيانات (data leakage) بين التدريب والتقييم.
 
 الاستخدام:
-    ANTHROPIC_API_KEY=sk-ant-... .venv/bin/python scripts/optimize_modules.py
+    GEMINI_API_KEY=... .venv/bin/python scripts/optimize_modules.py
 أو ضع المفتاح في ملف .env في جذر المشروع.
 
 يحفظ حالة الموديولين المُحسَّنين (demos فقط، JSON) تحت scripts/optimized/، ليتم
