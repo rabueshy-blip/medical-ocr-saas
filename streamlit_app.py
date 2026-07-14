@@ -27,6 +27,22 @@ from medical_ocr.schema import BlockType, PageSource, SourceEngine
 st.set_page_config(page_title="أداة الـ OCR الطبية", page_icon="🩺", layout="wide")
 
 
+def _load_secrets_into_env() -> None:
+    """على Streamlit Community Cloud تُضبط المفاتيح عبر st.secrets (لوحة التحكم)، لا عبر
+    .env محلي — هذه الدالة تجسرها إلى متغيرات البيئة كي يعمل configure_lm() (الذي يقرأ
+    os.getenv فقط) دون أي تعديل عليه. لا تأثير محلياً حيث تُقرأ القيم أصلاً من .env."""
+    try:
+        secrets = st.secrets
+    except Exception:
+        return
+    for key in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "MEDICAL_OCR_LM_MODEL"):
+        if key not in os.environ and key in secrets:
+            os.environ[key] = secrets[key]
+
+
+_load_secrets_into_env()
+
+
 @st.cache_resource(show_spinner=False)
 def _configure_lm_once() -> dict:
     try:
