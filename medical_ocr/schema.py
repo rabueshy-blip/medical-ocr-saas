@@ -38,6 +38,7 @@ class SourceEngine(str, Enum):
     PDFPLUMBER = "pdfplumber"
     PADDLEOCR = "paddleocr"
     EASYOCR = "easyocr"
+    GOOGLE_VISION = "google_vision"
     LLM_CORRECTED = "llm_corrected"
 
 

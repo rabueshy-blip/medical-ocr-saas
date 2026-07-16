@@ -2,7 +2,8 @@
 واجهة Streamlit بسيطة: رفع ملف PDF طبي ومشاهدة نتيجة الاستخراج مباشرة في المتصفح.
 
 خط الأنابيب المستخدم (`medical_ocr/ingest.py`): نص رقمي مباشر عبر PyMuPDF + جداول
-pdfplumber للصفحات التي تحوي طبقة نص، وOCR عبر easyocr للصفحات الممسوحة ضوئياً.
+pdfplumber للصفحات التي تحوي طبقة نص، وOCR عبر Google Vision API للصفحات الممسوحة ضوئياً
+(يتطلب GOOGLE_VISION_API_KEY، انظر .env.example).
 
 مبدأ مهم يعكس حداً بيئياً حقيقياً (راجع الذاكرة/plan.md): حصة Gemini المجانية صغيرة
 جداً وتُستهلك بسرعة، لذلك لا يوجد "تصحيح تلقائي للكل" — كل تصحيح بالذكاء الاصطناعي
@@ -35,7 +36,7 @@ def _load_secrets_into_env() -> None:
         secrets = st.secrets
     except Exception:
         return
-    for key in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "MEDICAL_OCR_LM_MODEL"):
+    for key in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "MEDICAL_OCR_LM_MODEL", "GOOGLE_VISION_API_KEY"):
         if key not in os.environ and key in secrets:
             os.environ[key] = secrets[key]
 
@@ -66,6 +67,7 @@ def _try_parse_json(raw: str):
 PAGE_SOURCE_LABELS = {PageSource.DIGITAL: "رقمية (نص مباشر)", PageSource.SCANNED: "ممسوحة (OCR)"}
 
 lm_status = _configure_lm_once()
+vision_configured = bool(os.getenv("GOOGLE_VISION_API_KEY"))
 
 with st.sidebar:
     st.header("حالة الذكاء الاصطناعي")
@@ -79,6 +81,13 @@ with st.sidebar:
         "تنبيه: حصة Gemini المجانية محدودة جداً يومياً، لذلك التصحيح بالذكاء "
         "الاصطناعي اختياري لكل نص/جدول عبر زر مخصص، وليس تلقائياً للملف كاملاً."
     )
+
+    st.header("حالة استخراج الصفحات الممسوحة")
+    if vision_configured:
+        st.success("متصل — Google Vision API (GOOGLE_VISION_API_KEY)")
+    else:
+        st.error("غير متصل: لا يوجد GOOGLE_VISION_API_KEY")
+        st.caption("الصفحات الرقمية غير متأثرة؛ الصفحات الممسوحة ضوئياً ستظهر برسالة فشل استخراج لكل صفحة.")
 
 st.title("🩺 أداة الـ OCR الطبية")
 st.caption("ارفع ملف PDF طبي (رقمي أو ممسوح ضوئياً) لاستخراج نصه وجداوله، مع تصحيح اختياري بالذكاء الاصطناعي.")
@@ -158,12 +167,17 @@ if uploaded_file is not None:
                         with st.expander("تفكير النموذج (Reasoning)"):
                             st.write(result["reasoning"])
 
+                elif block.source_engine == SourceEngine.GOOGLE_VISION and block.confidence == 0.0:
+                    # Block placeholder فشل استخراج (انظر extract_document في ingest.py) —
+                    # ليس نصاً طبياً فعلياً، فلا يُعرَض كفقرة عادية ولا يُتاح له زر تصحيح.
+                    st.error(block.text)
+
                 else:
-                    engine_label = "OCR" if block.source_engine == SourceEngine.EASYOCR else "نص رقمي"
+                    engine_label = "OCR (Google Vision)" if block.source_engine == SourceEngine.GOOGLE_VISION else "نص رقمي"
                     st.markdown(f"**فقرة** _(المصدر: {engine_label}, ثقة: {block.confidence:.2f})_")
                     st.text_area("النص الخام", value=block.text, height=100, key=f"{block_key}_raw", disabled=True)
 
-                    if lm_status["configured"] and block.source_engine == SourceEngine.EASYOCR:
+                    if lm_status["configured"] and block.source_engine == SourceEngine.GOOGLE_VISION:
                         if st.button("صحّح هذا النص بالذكاء الاصطناعي", key=f"{block_key}_spell_btn"):
                             with st.spinner("جارٍ التصحيح..."):
                                 try:
