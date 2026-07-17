@@ -24,21 +24,32 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import random
 import time
+from io import BytesIO
 from typing import List, Optional
 
 import fitz  # PyMuPDF
 import pdfplumber
 import requests
+from PIL import Image
 
 from .schema import Block, BlockType, BoundingBox, Document, Page, PageSource, SourceEngine
 
 MIN_DIGITAL_CHARS = 20
 
 _VISION_ENDPOINT = "https://vision.googleapis.com/v1/images:annotate"
-_VISION_MAX_ATTEMPTS = 3
+_VISION_MAX_ATTEMPTS = 4
 _VISION_RETRY_BACKOFF_SECONDS = 1.5
+_VISION_RETRY_BACKOFF_MAX_SECONDS = 12.0
 _VISION_TIMEOUT_SECONDS = 30
+_VISION_TIMEOUT_MAX_SECONDS = 90
+
+# الحد الفعلي لحجم الصورة المُرسَلة لـ Vision API — أصغر بكثير من حد الـ API الرسمي
+# (~20MB) عمداً: صفحات ممسوحة بدقة DPI عالية تنتج PNG كبيراً يسبب أخطاء "Request size
+# exceeds the limit" وانتهاء مهلة الاتصال على شبكات بطيئة قبل الوصول للحد الرسمي أصلاً.
+_VISION_MAX_IMAGE_BYTES = 4 * 1024 * 1024
+_VISION_MIN_JPEG_QUALITY = 40
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +137,64 @@ def _scanned_page_blocks_easyocr(page: fitz.Page, dpi: int = 200) -> List[Block]
     return blocks
 
 
+def _compress_image_to_limit(
+    image_bytes: bytes, max_bytes: int = _VISION_MAX_IMAGE_BYTES
+) -> bytes:
+    """يضغط صورة صفحة ممسوحة تحت حد حجم Vision API قبل إرسالها.
+
+    الترتيب مقصود: يُخفَّض أولاً جودة ترميز JPEG تدريجياً (تُبقي على نفس الدقة/الأبعاد،
+    وبالتالي أقل ضرراً على دقة OCR)، ولا تُصغَّر الأبعاد الفعلية للصورة إلا كملاذ أخير
+    إن لم تكفِ الجودة وحدها — تصغير الأبعاد يفقد تفاصيل حروف/أرقام دقيقة في مستندات
+    طبية كثيفة النص أكثر من تقليل جودة الضغط.
+    """
+    if len(image_bytes) <= max_bytes:
+        return image_bytes
+
+    image = Image.open(BytesIO(image_bytes)).convert("RGB")
+
+    for quality in (85, 70, 55, _VISION_MIN_JPEG_QUALITY):
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", quality=quality, optimize=True)
+        candidate = buffer.getvalue()
+        if len(candidate) <= max_bytes:
+            logger.info(
+                "ضُغطت صورة الصفحة إلى %d بايت (جودة JPEG=%d) للبقاء تحت حد %d بايت",
+                len(candidate),
+                quality,
+                max_bytes,
+            )
+            return candidate
+
+    scaled = image
+    for _ in range(6):
+        new_size = (max(1, int(scaled.width * 0.85)), max(1, int(scaled.height * 0.85)))
+        scaled = scaled.resize(new_size, Image.LANCZOS)
+        buffer = BytesIO()
+        scaled.save(buffer, format="JPEG", quality=_VISION_MIN_JPEG_QUALITY, optimize=True)
+        candidate = buffer.getvalue()
+        if len(candidate) <= max_bytes:
+            logger.info(
+                "صُغِّرت أبعاد صورة الصفحة إلى %dx%d (%d بايت) للبقاء تحت حد %d بايت",
+                new_size[0],
+                new_size[1],
+                len(candidate),
+                max_bytes,
+            )
+            return candidate
+
+    raise VisionAPIError(
+        f"تعذّر ضغط صورة الصفحة تحت حد {max_bytes} بايت حتى بعد تقليل الجودة والأبعاد."
+    )
+
+
+def _next_backoff_seconds(attempt: int) -> float:
+    """تصاعد أُسّي (exponential backoff) محدود بحد أقصى، مع jitter عشوائي بسيط (±20%)
+    لتفادي أن تُعيد عدة صفحات فاشلة في نفس اللحظة المحاولة معاً بنفس التوقيت بالضبط."""
+    base = min(_VISION_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1)), _VISION_RETRY_BACKOFF_MAX_SECONDS)
+    jitter = base * random.uniform(-0.2, 0.2)
+    return max(0.1, base + jitter)
+
+
 def _get_vision_api_key() -> str:
     api_key = os.getenv("GOOGLE_VISION_API_KEY")
     if not api_key:
@@ -149,6 +218,11 @@ def _call_vision_api(image_bytes: bytes) -> dict:
     إعادة المحاولة (retry) تُطبَّق فقط على الأعطال التقنية العابرة (أخطاء اتصال/timeout أو
     HTTP 5xx من جهة الخادم) — وليس على أخطاء 4xx (مفتاح غير صالح/طلب سيّئ)، لأن إعادة
     محاولة خطأ مصادقة لن تُصلحه وتُهدر وقتاً/حصة فقط.
+
+    كل من مهلة الاتصال (timeout) والانتظار بين المحاولات (backoff) يزدادان تصاعدياً مع
+    كل محاولة فاشلة (مع حد أقصى لكل منهما) بدل قيمة ثابتة — صفحة كبيرة/شبكة بطيئة قد
+    تحتاج مهلة أطول من المحاولة الأولى، والزيادة التصاعدية للانتظار (مع jitter عشوائي
+    بسيط) تقلّل احتمال اصطدام عدة محاولات متتالية بنفس عطل الخادم العابر.
     """
     api_key = _get_vision_api_key()
     payload = {
@@ -163,23 +237,32 @@ def _call_vision_api(image_bytes: bytes) -> dict:
 
     last_error: Optional[Exception] = None
     for attempt in range(1, _VISION_MAX_ATTEMPTS + 1):
+        timeout = min(
+            _VISION_TIMEOUT_SECONDS * attempt, _VISION_TIMEOUT_MAX_SECONDS
+        )
         try:
             response = requests.post(
                 _VISION_ENDPOINT,
                 params={"key": api_key},
                 json=payload,
-                timeout=_VISION_TIMEOUT_SECONDS,
+                timeout=timeout,
             )
         except requests.exceptions.RequestException as exc:
             last_error = exc
             if attempt < _VISION_MAX_ATTEMPTS:
+                kind = "مهلة اتصال" if isinstance(exc, requests.exceptions.Timeout) else "اتصال"
+                backoff = _next_backoff_seconds(attempt)
                 logger.warning(
-                    "فشل اتصال بـ Google Vision API (محاولة %d/%d): %s",
+                    "فشل %s بـ Google Vision API (محاولة %d/%d، مهلة %ds): %s — إعادة "
+                    "المحاولة بعد %.1fs",
+                    kind,
                     attempt,
                     _VISION_MAX_ATTEMPTS,
+                    timeout,
                     exc,
+                    backoff,
                 )
-                time.sleep(_VISION_RETRY_BACKOFF_SECONDS * attempt)
+                time.sleep(backoff)
                 continue
             raise VisionAPIError(
                 f"فشل الاتصال بـ Google Vision API بعد {_VISION_MAX_ATTEMPTS} محاولات: {exc}"
@@ -196,13 +279,15 @@ def _call_vision_api(image_bytes: bytes) -> dict:
 
         if response.status_code >= 500 and attempt < _VISION_MAX_ATTEMPTS:
             last_error = RuntimeError(f"HTTP {response.status_code}: {response.text[:300]}")
+            backoff = _next_backoff_seconds(attempt)
             logger.warning(
-                "خطأ خادم من Google Vision API (محاولة %d/%d): %s",
+                "خطأ خادم من Google Vision API (محاولة %d/%d): %s — إعادة المحاولة بعد %.1fs",
                 attempt,
                 _VISION_MAX_ATTEMPTS,
                 last_error,
+                backoff,
             )
-            time.sleep(_VISION_RETRY_BACKOFF_SECONDS * attempt)
+            time.sleep(backoff)
             continue
 
         # 4xx أو خطأ 5xx بعد استنفاد المحاولات: لا فائدة من إعادة محاولة إضافية.
@@ -263,10 +348,11 @@ def _blocks_from_vision_page(vision_page: dict) -> List[Block]:
 
 
 def _scanned_page_blocks_vision(page: fitz.Page, dpi: int = 200) -> List[Block]:
-    """محرك OCR الأساسي الحالي للصفحات الممسوحة: يرستر الصفحة كاملة إلى PNG ثم يمرّرها
-    لـ Google Vision API (DOCUMENT_TEXT_DETECTION)."""
+    """محرك OCR الأساسي الحالي للصفحات الممسوحة: يرستر الصفحة كاملة إلى PNG، يضغطها تحت
+    حد حجم Vision API عند الحاجة (`_compress_image_to_limit`)، ثم يمرّرها لـ Google
+    Vision API (DOCUMENT_TEXT_DETECTION)."""
     pixmap = page.get_pixmap(dpi=dpi)
-    image_bytes = pixmap.tobytes("png")
+    image_bytes = _compress_image_to_limit(pixmap.tobytes("png"))
 
     vision_response = _call_vision_api(image_bytes)
     full_text_annotation = vision_response.get("fullTextAnnotation")
