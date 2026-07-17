@@ -34,3 +34,8 @@ opencv-python-headless
 numpy
 pandas
 Pillow
+
+# --- تصدير التقارير: Excel (محرك pandas.to_excel) وWord (docx حقيقي بجداول، وليس
+# نصاً مسطَّحاً) — كلاهما Python خالص عملياً، لا يتطلب مترجم/Homebrew ---
+openpyxl
+python-docx

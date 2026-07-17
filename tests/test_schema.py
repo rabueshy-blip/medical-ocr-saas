@@ -4,6 +4,7 @@ from pydantic import ValidationError
 
 from medical_ocr.schema import (
     Block,
+    BlockCategory,
     BlockType,
     BoundingBox,
     Document,
@@ -53,6 +54,23 @@ class TestBlock(unittest.TestCase):
                 source_engine=SourceEngine.PYMUPDF,
                 confidence=1.5,
             )
+
+    def test_category_defaults_to_none(self):
+        block = Block(
+            block_type=BlockType.PARAGRAPH,
+            text="نص",
+            source_engine=SourceEngine.PYMUPDF,
+        )
+        self.assertIsNone(block.category)
+
+    def test_category_can_be_set_after_construction(self):
+        block = Block(
+            block_type=BlockType.PARAGRAPH,
+            text="نص",
+            source_engine=SourceEngine.PYMUPDF,
+        )
+        block.category = BlockCategory.PATIENT_INFO
+        self.assertEqual(block.category, BlockCategory.PATIENT_INFO)
 
 
 class TestDocumentTree(unittest.TestCase):

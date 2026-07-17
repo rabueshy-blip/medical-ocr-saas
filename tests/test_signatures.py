@@ -7,6 +7,18 @@
 import json
 import unittest
 
+import dspy
+
+from medical_ocr.schema import Block, BlockCategory, BlockType, Page, SourceEngine
+from medical_ocr.signatures.classification import (
+    MedicalBlockClassification,
+    MedicalBlockClassifier,
+    apply_classification_to_page,
+    build_page_blocks_payload,
+    classification_reward,
+    encode_page_blocks,
+    is_classification_valid,
+)
 from medical_ocr.signatures.spelling import (
     MedicalSpellingCorrection,
     MedicalSpellingCorrector,
@@ -154,6 +166,159 @@ class TestRowValuesGrounded(unittest.TestCase):
         raw_rows = [["Hemoglobin", None]]
         structured = json.dumps([{"الفحص": "Hemoglobin", "القيمة": "13.5"}])
         self.assertTrue(row_values_grounded(raw_rows, structured))
+
+
+class TestMedicalBlockClassificationSignature(unittest.TestCase):
+    def test_signature_has_expected_fields(self):
+        fields = MedicalBlockClassification.model_fields
+        self.assertIn("page_blocks", fields)
+        self.assertIn("classifications", fields)
+
+    def test_module_constructs_without_lm_configured(self):
+        classifier = MedicalBlockClassifier()
+        self.assertIsInstance(classifier, MedicalBlockClassifier)
+
+
+class TestBuildPageBlocksPayload(unittest.TestCase):
+    def _page(self):
+        return Page(
+            page_number=1,
+            source="digital",
+            blocks=[
+                Block(
+                    block_type=BlockType.PARAGRAPH,
+                    text="اسم المريض: أحمد محمد",
+                    source_engine=SourceEngine.PYMUPDF,
+                ),
+                Block(
+                    block_type=BlockType.TABLE,
+                    rows=[["Hemoglobin", "13.5"], ["Glucose", "95"]],
+                    source_engine=SourceEngine.PDFPLUMBER,
+                ),
+            ],
+        )
+
+    def test_payload_shape_is_json_round_trippable(self):
+        payload = build_page_blocks_payload(self._page())
+        encoded = encode_page_blocks(payload)
+        decoded = json.loads(encoded)
+        self.assertEqual(len(decoded), 2)
+        self.assertEqual(decoded[0]["index"], 0)
+        self.assertEqual(decoded[0]["block_type"], "paragraph")
+        self.assertIn("أحمد محمد", decoded[0]["preview"])
+        self.assertEqual(decoded[1]["block_type"], "table")
+        self.assertIn("Hemoglobin", decoded[1]["preview"])
+
+    def test_prefers_corrected_text_over_raw_when_available(self):
+        page = self._page()
+        corrections = {"p1_b0": {"corrected_text": "اسم المريض: أحمد محمد علي"}}
+        payload = build_page_blocks_payload(page, corrections)
+        self.assertIn("أحمد محمد علي", payload[0]["preview"])
+
+    def test_prefers_structured_rows_over_raw_for_tables(self):
+        page = self._page()
+        corrections = {"p1_b1": {"structured_rows": [{"الفحص": "Hemoglobin", "القيمة": "13.5"}]}}
+        payload = build_page_blocks_payload(page, corrections)
+        self.assertIn("Hemoglobin", payload[1]["preview"])
+
+
+class TestIsClassificationValid(unittest.TestCase):
+    def _blocks_json(self, n):
+        return encode_page_blocks([{"index": i, "block_type": "paragraph", "preview": "x"} for i in range(n)])
+
+    def test_valid_full_coverage_passes(self):
+        classifications = json.dumps(
+            [
+                {"index": 0, "category": "patient_info"},
+                {"index": 1, "category": "clinical_results"},
+                {"index": 2, "category": "doctor_notes"},
+            ]
+        )
+        self.assertTrue(is_classification_valid(self._blocks_json(3), classifications))
+
+    def test_missing_index_fails(self):
+        classifications = json.dumps([{"index": 0, "category": "other"}, {"index": 1, "category": "other"}])
+        self.assertFalse(is_classification_valid(self._blocks_json(3), classifications))
+
+    def test_duplicate_index_fails(self):
+        classifications = json.dumps(
+            [
+                {"index": 0, "category": "other"},
+                {"index": 0, "category": "other"},
+                {"index": 1, "category": "other"},
+            ]
+        )
+        self.assertFalse(is_classification_valid(self._blocks_json(3), classifications))
+
+    def test_out_of_range_index_fails(self):
+        classifications = json.dumps([{"index": 0, "category": "other"}, {"index": 5, "category": "other"}])
+        self.assertFalse(is_classification_valid(self._blocks_json(2), classifications))
+
+    def test_invalid_category_value_fails(self):
+        classifications = json.dumps([{"index": 0, "category": "lab_results"}])
+        self.assertFalse(is_classification_valid(self._blocks_json(1), classifications))
+
+    def test_invalid_json_fails(self):
+        self.assertFalse(is_classification_valid(self._blocks_json(1), "not json"))
+
+    def test_non_list_classifications_fails(self):
+        self.assertFalse(is_classification_valid(self._blocks_json(1), json.dumps({"0": "other"})))
+
+    def test_missing_required_key_in_item_fails(self):
+        classifications = json.dumps([{"index": 0}])
+        self.assertFalse(is_classification_valid(self._blocks_json(1), classifications))
+
+
+class TestClassificationReward(unittest.TestCase):
+    def test_reward_is_one_for_valid_prediction(self):
+        page_blocks_json = encode_page_blocks([{"index": 0, "block_type": "paragraph", "preview": "x"}])
+        prediction = dspy.Prediction(classifications=json.dumps([{"index": 0, "category": "other"}]))
+        self.assertEqual(classification_reward({"page_blocks": page_blocks_json}, prediction), 1.0)
+
+    def test_reward_is_zero_for_invalid_prediction(self):
+        page_blocks_json = encode_page_blocks([{"index": 0, "block_type": "paragraph", "preview": "x"}])
+        prediction = dspy.Prediction(classifications="not json")
+        self.assertEqual(classification_reward({"page_blocks": page_blocks_json}, prediction), 0.0)
+
+
+class TestApplyClassificationToPage(unittest.TestCase):
+    def _page(self):
+        return Page(
+            page_number=1,
+            source="digital",
+            blocks=[
+                Block(block_type=BlockType.PARAGRAPH, text="a", source_engine=SourceEngine.PYMUPDF),
+                Block(block_type=BlockType.PARAGRAPH, text="b", source_engine=SourceEngine.PYMUPDF),
+            ],
+        )
+
+    def test_valid_prediction_sets_category_on_each_block(self):
+        page = self._page()
+        page_blocks = [
+            {"index": 0, "block_type": "paragraph", "preview": "a"},
+            {"index": 1, "block_type": "paragraph", "preview": "b"},
+        ]
+        prediction = dspy.Prediction(
+            classifications=json.dumps(
+                [{"index": 0, "category": "patient_info"}, {"index": 1, "category": "doctor_notes"}]
+            )
+        )
+        result = apply_classification_to_page(page, page_blocks, prediction)
+        self.assertTrue(result)
+        self.assertEqual(page.blocks[0].category, BlockCategory.PATIENT_INFO)
+        self.assertEqual(page.blocks[1].category, BlockCategory.DOCTOR_NOTES)
+
+    def test_invalid_prediction_falls_back_to_other_for_whole_page_and_returns_false(self):
+        page = self._page()
+        page_blocks = [
+            {"index": 0, "block_type": "paragraph", "preview": "a"},
+            {"index": 1, "block_type": "paragraph", "preview": "b"},
+        ]
+        prediction = dspy.Prediction(classifications="not json")
+        result = apply_classification_to_page(page, page_blocks, prediction)
+        self.assertFalse(result)
+        self.assertEqual(page.blocks[0].category, BlockCategory.OTHER)
+        self.assertEqual(page.blocks[1].category, BlockCategory.OTHER)
 
 
 if __name__ == "__main__":

@@ -42,6 +42,19 @@ class SourceEngine(str, Enum):
     LLM_CORRECTED = "llm_corrected"
 
 
+class BlockCategory(str, Enum):
+    """تصنيف دلالي لمحتوى Block (معلومات مريض / نتائج سريرية / ملاحظات طبيب)، يُضاف
+    بعد الاستخراج عبر موديول DSPy منفصل (`medical_ocr/signatures/classification.py`)
+    — وليس أثناء extract_document نفسها، لأن التصنيف يستدعي LM (مكلف/محدود الحصة)
+    بخلاف الاستخراج الحر. OTHER تُستخدَم لأي محتوى غامض بدل تخمين تصنيف غير موثوق،
+    بنفس فلسفة UNCERTAIN في numeric_guard.py."""
+
+    PATIENT_INFO = "patient_info"
+    CLINICAL_RESULTS = "clinical_results"
+    DOCTOR_NOTES = "doctor_notes"
+    OTHER = "other"
+
+
 class BoundingBox(BaseModel):
     x0: float
     y0: float
@@ -60,6 +73,7 @@ class Block(BaseModel):
     bbox: Optional[BoundingBox] = None
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     source_engine: SourceEngine
+    category: Optional[BlockCategory] = None
 
     @model_validator(mode="after")
     def _check_content_and_seed_audit_trail(self) -> "Block":

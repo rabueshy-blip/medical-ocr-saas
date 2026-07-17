@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from ..signatures.classification import MedicalBlockClassifier
 from ..signatures.spelling import MedicalSpellingCorrector
 from ..signatures.tables import MedicalTableStructurer
 from ..terminology import DEFAULT_TERMS_PATH, MedicalTerminologyRetriever
@@ -23,3 +24,8 @@ def get_spelling_corrector() -> MedicalSpellingCorrector:
 @lru_cache(maxsize=1)
 def get_table_structurer() -> MedicalTableStructurer:
     return MedicalTableStructurer()
+
+
+@lru_cache(maxsize=1)
+def get_block_classifier() -> MedicalBlockClassifier:
+    return MedicalBlockClassifier()
