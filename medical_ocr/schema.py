@@ -96,9 +96,24 @@ class Page(BaseModel):
     blocks: List[Block] = Field(default_factory=list)
 
 
+class ImageAsset(BaseModel):
+    """صورة/رسم بياني مُضمَّن مُستخرَج من صفحة رقمية (get_images في PyMuPDF)، لعرضه في
+    مكتبة الوسائط الجانبية بالواجهة كي يسحبه المترجم يدوياً لمكانه الصحيح — الاستخراج
+    مقصور على الصفحات الرقمية لأن الصفحة الممسوحة بالكامل هي نفسها صورة واحدة كبيرة
+    (تُستخدم أصلاً كمدخل OCR)، وليست "شكلاً" مضمَّناً بالمعنى المقصود هنا."""
+
+    page_number: int = Field(ge=1)
+    index: int
+    mime_type: str
+    data_base64: str
+    width: int
+    height: int
+
+
 class Document(BaseModel):
     file_name: str
     pages: List[Page] = Field(default_factory=list)
+    images: List[ImageAsset] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------

@@ -27,14 +27,23 @@ import os
 import random
 import time
 from io import BytesIO
-from typing import List, Optional
+from typing import List, Optional, Set
 
 import fitz  # PyMuPDF
 import pdfplumber
 import requests
 from PIL import Image
 
-from .schema import Block, BlockType, BoundingBox, Document, Page, PageSource, SourceEngine
+from .schema import (
+    Block,
+    BlockType,
+    BoundingBox,
+    Document,
+    ImageAsset,
+    Page,
+    PageSource,
+    SourceEngine,
+)
 
 MIN_DIGITAL_CHARS = 20
 
@@ -106,6 +115,37 @@ def _table_blocks(pdfplumber_page) -> List[Block]:
             )
         )
     return blocks
+
+
+def _page_images(
+    fitz_doc: fitz.Document, fitz_page: fitz.Page, page_number: int, seen_xrefs: Set[int]
+) -> List[ImageAsset]:
+    """يستخرج الصور المُضمَّنة في صفحة رقمية واحدة (شعارات/رسوم بيانية) لمكتبة الوسائط.
+
+    `seen_xrefs` يُشارَك عبر المستند كله لتفادي تكرار نفس الصورة (شعار ثابت في كل
+    صفحة مثلاً) مرات عديدة في الحمولة المُرسَلة للواجهة."""
+    images: List[ImageAsset] = []
+    for img_index, img in enumerate(fitz_page.get_images(full=True)):
+        xref = img[0]
+        if xref in seen_xrefs:
+            continue
+        seen_xrefs.add(xref)
+        try:
+            extracted = fitz_doc.extract_image(xref)
+        except Exception as exc:
+            logger.warning("تعذّر استخراج الصورة xref=%d من الصفحة %d: %s", xref, page_number, exc)
+            continue
+        images.append(
+            ImageAsset(
+                page_number=page_number,
+                index=img_index,
+                mime_type=f"image/{extracted['ext']}",
+                data_base64=base64.b64encode(extracted["image"]).decode("ascii"),
+                width=extracted.get("width", 0),
+                height=extracted.get("height", 0),
+            )
+        )
+    return images
 
 
 def _scanned_page_blocks_easyocr(page: fitz.Page, dpi: int = 200) -> List[Block]:
@@ -376,6 +416,8 @@ def extract_document(pdf_path: str, file_name: Optional[str] = None) -> Document
     الأخرى الناجحة."""
     fitz_doc = fitz.open(pdf_path)
     pages: List[Page] = []
+    images: List[ImageAsset] = []
+    seen_image_xrefs: Set[int] = set()
 
     with pdfplumber.open(pdf_path) as plumber_doc:
         for index in range(fitz_doc.page_count):
@@ -385,6 +427,7 @@ def extract_document(pdf_path: str, file_name: Optional[str] = None) -> Document
             if len(digital_text) >= MIN_DIGITAL_CHARS:
                 blocks = _digital_page_blocks(fitz_page) + _table_blocks(plumber_doc.pages[index])
                 source = PageSource.DIGITAL
+                images.extend(_page_images(fitz_doc, fitz_page, index + 1, seen_image_xrefs))
             else:
                 source = PageSource.SCANNED
                 try:
@@ -405,4 +448,4 @@ def extract_document(pdf_path: str, file_name: Optional[str] = None) -> Document
             pages.append(Page(page_number=index + 1, source=source, blocks=blocks))
 
     fitz_doc.close()
-    return Document(file_name=file_name or pdf_path, pages=pages)
+    return Document(file_name=file_name or pdf_path, pages=pages, images=images)

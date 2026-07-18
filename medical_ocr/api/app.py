@@ -15,9 +15,10 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from ..lm_config import configure_lm
-from .routers import spelling, tables
+from .routers import documents, export, spelling, tables
 from .schemas import HealthResponse
 
 logger = logging.getLogger(__name__)
@@ -36,8 +37,18 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Medical OCR — Reasoning Pipeline API", version="0.1.0", lifespan=lifespan)
 
+# للتطوير المحلي فقط: يسمح لواجهة Next.js (منفذ 3000 افتراضياً) بمناداة الـAPI عبر المتصفح.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(spelling.router)
 app.include_router(tables.router)
+app.include_router(documents.router)
+app.include_router(export.router)
 
 
 @app.get("/health", response_model=HealthResponse)

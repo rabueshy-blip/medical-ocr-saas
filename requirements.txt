@@ -28,6 +28,7 @@ streamlit
 # --- FastAPI: ربط الـ pipeline المُحسَّن بنقاط API خارجية ---
 fastapi
 uvicorn[standard]
+python-multipart
 
 # --- اعتماديات مساعدة ---
 opencv-python-headless
@@ -39,3 +40,9 @@ Pillow
 # نصاً مسطَّحاً) — كلاهما Python خالص عملياً، لا يتطلب مترجم/Homebrew ---
 openpyxl
 python-docx
+
+# --- تصدير PDF: Playwright (Chromium headless) بدل WeasyPrint عمداً — WeasyPrint يحتاج
+# Pango/Cairo على مستوى النظام (غير متاح، لا Homebrew/sudo)، بينما ثنائي Chromium الخاص
+# بـ Playwright يُنزَّل عبر pip/`playwright install chromium` بلا صلاحيات إدارية.
+# بعد `pip install`، يجب تشغيل: playwright install chromium (تنزيل ~260MB، مرة واحدة) ---
+playwright
