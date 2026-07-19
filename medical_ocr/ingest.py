@@ -79,11 +79,25 @@ def _get_easyocr_reader():
     return _easyocr_reader
 
 
-def _digital_page_blocks(page: fitz.Page) -> List[Block]:
+def _bbox_center_in_any(bbox: tuple, containers: List[tuple]) -> bool:
+    """يتحقق إن كانت نقطة مركز bbox تقع داخل أي مستطيل من containers — تُستخدم لاستبعاد
+    spans نصية تنتمي فعلياً لخلية جدول مكتشف بدل تكرارها كفقرة منفصلة."""
+    cx = (bbox[0] + bbox[2]) / 2
+    cy = (bbox[1] + bbox[3]) / 2
+    for x0, y0, x1, y1 in containers:
+        if x0 <= cx <= x1 and y0 <= cy <= y1:
+            return True
+    return False
+
+
+def _digital_page_blocks(page: fitz.Page, exclude_bboxes: Optional[List[tuple]] = None) -> List[Block]:
+    exclude_bboxes = exclude_bboxes or []
     blocks = []
     for x0, y0, x1, y1, text, *_rest in page.get_text("blocks"):
         text = text.strip()
         if not text:
+            continue
+        if _bbox_center_in_any((x0, y0, x1, y1), exclude_bboxes):
             continue
         blocks.append(
             Block(
@@ -97,18 +111,98 @@ def _digital_page_blocks(page: fitz.Page) -> List[Block]:
     return blocks
 
 
+_TEXT_TABLE_SETTINGS = {
+    "vertical_strategy": "text",
+    "horizontal_strategy": "text",
+    # أكثر تسامحاً من الافتراضي (3px) مع الانحراف الطفيف في محاذاة الأرقام/النصوص داخل
+    # جداول بلا خطوط شبكة مرسومة (شائعة في نتائج المختبرات) — لاحظ أن هذا وحده لا يمنع
+    # صفوفاً فارغة وهمية بين الصفوف الحقيقية (سبب مختلف، متعلق بتوليف الخطوط الوهمية من
+    # مواضع الكلمات، وليس بتفاوت محاذاة الحروف) — لذلك تُرشَّح الصفوف الفارغة بالكامل
+    # لاحقاً في `_table_blocks` كحل عام بدل محاولة ضبط hyper-parameters هشة إضافية.
+    "text_x_tolerance": 5,
+    "text_y_tolerance": 5,
+}
+
+
+def _find_tables(pdfplumber_page):
+    """يحاول اكتشاف الجداول أولاً بالإعدادات الافتراضية (تعتمد خطوط شبكة مرسومة فعلياً —
+    الأدق حين تكون موجودة)، ثم يلجأ لاستراتيجية `"text"` (محاذاة نصية بلا خطوط) فقط إن
+    لم يكتشف الإعداد الافتراضي أي جدول — كثير من جداول النتائج المخبرية الطبية ليس لها
+    خطوط شبكة مرسومة أصلاً. تطبيق `"text"` مباشرة على جدول له خطوط فعلية يُفسِد النتيجة
+    (يُنتج صفوفاً فارغة وهمية من المسافة حول الخطوط)، لذا الترتيب هنا مقصود وليس تبسيطاً."""
+    tables = pdfplumber_page.find_tables()
+    if tables:
+        return tables
+    return pdfplumber_page.find_tables(table_settings=_TEXT_TABLE_SETTINGS)
+
+
+def _extract_table_rows(table) -> tuple[List[List[str]], List[List[int]]]:
+    """يبني rows (نص كل خلية حقيقية) وcolspans (عدد الأعمدة التي تمتد عبرها) من جدول
+    pdfplumber واحد.
+
+    خلية مدمجة في PDF المصدر (بلا خط فاصل بينها وبين ما يجاورها) تظهر في
+    `table.rows[i].cells` كموضع واحد ببعد عريض، تتبعه قيمة `None` في كل موضع شبكي
+    ابتلعته — تحقّقنا من هذا السلوك عملياً على جدول حقيقي فيه دمج (وليس افتراضاً نظرياً)
+    قبل الاعتماد عليه. `table.extract()` يضع نص الخلية المدمجة في موضعها الأول ويترك
+    `None` (وليس نصاً فارغاً) في المواضع المُبتلَعة، فنستخدم هذا الفارق (`None` تحديداً)
+    للتمييز بين "خلية مدمجة اُبتلعت" و"خلية عادية فارغة فعلاً" (نص فارغ `""`)."""
+    extracted_rows = table.extract()
+    rows: List[List[str]] = []
+    colspans: List[List[int]] = []
+    for row_obj, text_row in zip(table.rows, extracted_rows):
+        cells = row_obj.cells
+        row_texts: List[str] = []
+        row_spans: List[int] = []
+        i = 0
+        n = len(cells)
+        while i < n:
+            if cells[i] is None:
+                i += 1
+                continue
+            span = 1
+            j = i + 1
+            while j < n and cells[j] is None:
+                span += 1
+                j += 1
+            row_texts.append(text_row[i] or "")
+            row_spans.append(span)
+            i = j
+        rows.append(row_texts)
+        colspans.append(row_spans)
+    return rows, colspans
+
+
 def _table_blocks(pdfplumber_page) -> List[Block]:
     blocks = []
-    for table in pdfplumber_page.find_tables():
-        rows = table.extract()
-        if not rows:
+    for table in _find_tables(pdfplumber_page):
+        # حارس أمان: عرض الشبكة الفعلي (قبل أي دمج) يجب أن يكون عمودين على الأقل —
+        # استراتيجية "text" الاحتياطية تتحمس أحياناً على نص عادي محاذى لليسار وتخترع
+        # "جدولاً" بعمود واحد يكرر نفس الفقرات، وعمود واحد لا يمثّل جدولاً قابلاً
+        # للترجمة عبر صفوف/أعمدة فعلية.
+        grid_width = len(table.rows[0].cells) if table.rows else 0
+        if grid_width < 2:
             continue
+
+        rows, colspans = _extract_table_rows(table)
+        # صفوف فارغة بالكامل (كل خلاياها "") هي ضوضاء بنيوية بحتة (ناتجة عن توليف خطوط
+        # وهمية من مواضع الكلمات في استراتيجية "text") ولا تحمل أي بيانات تُترجَم أبداً،
+        # فتُحذف بغضّ النظر عن مصدر الجدول.
+        kept = [
+            (row, spans)
+            for row, spans in zip(rows, colspans)
+            if any(cell.strip() for cell in row)
+        ]
+        if not kept:
+            continue
+        rows, colspans = [r for r, _ in kept], [s for _, s in kept]
+
         normalized_rows = [[cell or "" for cell in row] for row in rows]
         x0, y0, x1, y1 = table.bbox
         blocks.append(
             Block(
                 block_type=BlockType.TABLE,
                 rows=normalized_rows,
+                colspans=colspans,
                 bbox=BoundingBox(x0=x0, y0=y0, x1=x1, y1=y1),
                 confidence=1.0,
                 source_engine=SourceEngine.PDFPLUMBER,
@@ -405,6 +499,36 @@ def _scanned_page_blocks_vision(page: fitz.Page, dpi: int = 200) -> List[Block]:
     return blocks
 
 
+def _normalize_header_text(text: str) -> str:
+    return " ".join(text.split()).strip().lower()
+
+
+def _strip_repeated_page_headers(pages: List[Page]) -> None:
+    """يحذف الترويسة المكررة (شعار/اسم المستشفى، عنوان التقرير) من بداية كل صفحة بعد
+    الأولى إن كانت مطابقة نصياً لبداية الصفحة الأولى — يُبقي أثراً واحداً فقط في
+    المستند الناتج بدل تكرارها في كل صفحة، وهو ما يربك برامج CAT عند فتح ملف Word
+    المُصدَّر لاحقاً. المقارنة بالترتيب موضعياً (block بـblock) بادئةً من أول الصفحة،
+    وتتوقف عند أول اختلاف أو أول جدول (block.text=None) — الجداول لا تُعتبر جزءاً من
+    الترويسة أبداً."""
+    if len(pages) < 2:
+        return
+
+    first_page_texts = [
+        _normalize_header_text(b.text) if b.text is not None else None for b in pages[0].blocks
+    ]
+
+    for page in pages[1:]:
+        match_count = 0
+        for block, first_text in zip(page.blocks, first_page_texts):
+            if block.text is None or first_text is None:
+                break
+            if _normalize_header_text(block.text) != first_text:
+                break
+            match_count += 1
+        if match_count:
+            page.blocks = page.blocks[match_count:]
+
+
 def extract_document(pdf_path: str, file_name: Optional[str] = None) -> Document:
     """يفتح ملف PDF كاملاً ويحوّله إلى Document: نص رقمي عبر PyMuPDF + جداول pdfplumber
     للصفحات التي تحتوي طبقة نص، وOCR عبر Google Vision API (raster لكامل الصفحة) للصفحات
@@ -425,7 +549,11 @@ def extract_document(pdf_path: str, file_name: Optional[str] = None) -> Document
             digital_text = fitz_page.get_text("text").strip()
 
             if len(digital_text) >= MIN_DIGITAL_CHARS:
-                blocks = _digital_page_blocks(fitz_page) + _table_blocks(plumber_doc.pages[index])
+                table_blocks = _table_blocks(plumber_doc.pages[index])
+                table_bboxes = [
+                    (b.bbox.x0, b.bbox.y0, b.bbox.x1, b.bbox.y1) for b in table_blocks if b.bbox
+                ]
+                blocks = _digital_page_blocks(fitz_page, exclude_bboxes=table_bboxes) + table_blocks
                 source = PageSource.DIGITAL
                 images.extend(_page_images(fitz_doc, fitz_page, index + 1, seen_image_xrefs))
             else:
@@ -448,4 +576,5 @@ def extract_document(pdf_path: str, file_name: Optional[str] = None) -> Document
             pages.append(Page(page_number=index + 1, source=source, blocks=blocks))
 
     fitz_doc.close()
+    _strip_repeated_page_headers(pages)
     return Document(file_name=file_name or pdf_path, pages=pages, images=images)

@@ -70,6 +70,9 @@ class Block(BaseModel):
     raw_text: Optional[str] = None
     rows: Optional[List[List[str]]] = None
     raw_rows: Optional[List[List[str]]] = None
+    # عدد الأعمدة التي تمتد عبرها كل خلية (بنفس ترتيب rows، صف بصف) — اختياري، يُفترض
+    # 1 لكل خلية عند غيابه. يُملأ فقط عند اكتشاف خلايا مدمجة فعلياً في PDF المصدر.
+    colspans: Optional[List[List[int]]] = None
     bbox: Optional[BoundingBox] = None
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     source_engine: SourceEngine

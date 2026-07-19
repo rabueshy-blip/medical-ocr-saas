@@ -53,20 +53,42 @@ def _add_paragraph_or_heading(doc: DocxDocument, node: dict) -> None:
 
 
 def _add_table(doc: DocxDocument, node: dict) -> None:
+    """يبني جدول Word حقيقياً — بما فيها دمج الخلايا (colspan) القادمة من TipTap
+    (`attrs.colspan` على tableCell/tableHeader، مُولَّدة أصلاً من خلايا مدمجة حقيقية في
+    PDF المصدر عبر documentToTiptap.ts، أو من دمج يدوي للمترجم داخل المحرر).
+
+    عرض الشبكة الكلي (`num_cols`) يُحسَب من **مجموع** colspan لكل صف (وليس عدد عناصر
+    المحتوى) لأن صفاً فيه خلية مدمجة يحتوي عناصر JSON أقل من عرض الشبكة الفعلي."""
     row_nodes = node.get("content", [])
     if not row_nodes:
         return
-    num_cols = len(row_nodes[0].get("content", []))
+    num_cols = max(
+        (
+            sum(
+                int(cell_node.get("attrs", {}).get("colspan", 1))
+                for cell_node in row_node.get("content", [])
+            )
+            for row_node in row_nodes
+        ),
+        default=0,
+    )
     if num_cols == 0:
         return
     table = doc.add_table(rows=0, cols=num_cols)
     table.style = "Table Grid"
     for row_node in row_nodes:
         row_cells = table.add_row().cells
-        for i, cell_node in enumerate(row_node.get("content", [])):
-            if i >= num_cols:
+        col_cursor = 0
+        for cell_node in row_node.get("content", []):
+            if col_cursor >= num_cols:
                 break
-            row_cells[i].text = _extract_text(cell_node)
+            colspan = int(cell_node.get("attrs", {}).get("colspan", 1))
+            colspan = max(1, min(colspan, num_cols - col_cursor))
+            target_cell = row_cells[col_cursor]
+            target_cell.text = _extract_text(cell_node)
+            if colspan > 1:
+                target_cell.merge(row_cells[col_cursor + colspan - 1])
+            col_cursor += colspan
 
 
 def _add_image(doc: DocxDocument, node: dict) -> None:
@@ -127,8 +149,10 @@ def _node_to_html(node: dict) -> str:
             cells_html = []
             for cell in row.get("content", []):
                 tag = "th" if cell.get("type") == "tableHeader" else "td"
+                colspan = int(cell.get("attrs", {}).get("colspan", 1))
+                colspan_attr = f' colspan="{colspan}"' if colspan > 1 else ""
                 inner = "".join(_node_to_html(child) for child in cell.get("content", []))
-                cells_html.append(f"<{tag}>{inner}</{tag}>")
+                cells_html.append(f"<{tag}{colspan_attr}>{inner}</{tag}>")
             rows_html.append(f"<tr>{''.join(cells_html)}</tr>")
         return f"<table>{''.join(rows_html)}</table>"
     if node_type == "image":

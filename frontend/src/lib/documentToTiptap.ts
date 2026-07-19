@@ -30,15 +30,21 @@ function blockToNode(block: Block, pageNumber: number): Record<string, unknown> 
       attrs: locationAttrs,
       content: block.rows.map((row, rowIndex) => ({
         type: "tableRow",
-        content: row.map((cellText) => ({
-          type: rowIndex === 0 ? "tableHeader" : "tableCell",
-          content: [
-            {
-              type: "paragraph",
-              content: cellText ? [{ type: "text", text: cellText }] : [],
-            },
-          ],
-        })),
+        content: row.map((cellText, cellIndex) => {
+          const colspan = block.colspans?.[rowIndex]?.[cellIndex] ?? 1;
+          return {
+            type: rowIndex === 0 ? "tableHeader" : "tableCell",
+            // colspan افتراضي 1 من إضافة الجدول نفسها في TipTap — لا يُضاف attrs.colspan
+            // إلا عند دمج فعلي (>1) مكتشف من PDF المصدر، للحفاظ على JSON نظيف.
+            ...(colspan > 1 ? { attrs: { colspan } } : {}),
+            content: [
+              {
+                type: "paragraph",
+                content: cellText ? [{ type: "text", text: cellText }] : [],
+              },
+            ],
+          };
+        }),
       })),
     };
   }

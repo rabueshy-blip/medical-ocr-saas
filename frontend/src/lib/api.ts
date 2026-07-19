@@ -18,6 +18,7 @@ export interface Block {
   raw_text: string | null;
   rows: string[][] | null;
   raw_rows: string[][] | null;
+  colspans: number[][] | null;
   bbox: BoundingBox | null;
   confidence: number;
   source_engine: string;
