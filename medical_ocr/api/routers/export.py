@@ -48,7 +48,12 @@ class ExportRequest(BaseModel):
 
 
 def _safe_file_name(file_name: str) -> str:
-    return re.sub(r"[^\w\-. ]", "_", file_name).strip() or "translated_document"
+    """يبقي فقط أحرف ASCII آمنة — `\\w` في Python يطابق أحرفاً عربية/يونيكود أيضاً
+    (ليس ASCII فقط)، فيمر اسم ملف عربي دون تغيير ثم يُسبِّب `UnicodeEncodeError` عند
+    وضعه في ترويسة `Content-Disposition` (يجب أن تكون latin-1 قابلة للترميز حسب
+    HTTP). اسم الملف الأصلي (بأي لغة) يبقى محفوظاً في المستند نفسه، هذا فقط لاسم
+    ملف التنزيل."""
+    return re.sub(r"[^a-zA-Z0-9_\-. ]", "_", file_name).strip() or "translated_document"
 
 
 def _extract_text(node: dict) -> str:

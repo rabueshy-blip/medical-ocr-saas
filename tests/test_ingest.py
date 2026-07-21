@@ -372,20 +372,26 @@ def _vision_word(text, x0, x1, top, bottom):
 def _dexa_style_words(include_surrounding_paragraph: bool) -> list:
     """يبني كلمات جدول DEXA اصطناعي (Region/BMD/T-Score/Z-Score) بفجوات أفقية واسعة
     بين الأعمدة، مع خيار تضمين سطر نص عادي محيط (لاختبار عدم التأثر بنسبة الجدول من
-    الصفحة — انظر توثيق `_detect_scanned_table_regions`)."""
+    الصفحة — انظر توثيق `_detect_scanned_table_regions`).
+
+    كل الفجوات هنا (نثر ~20-30px، أعمدة ~165-270px) مبنية على قياسات حقيقية فعلية
+    عبر Vision API حياً على صفحات DEXA حقيقية (وليست أرقاماً مُخترَعة) — نسخة أولى
+    من هذا الملف استخدمت فجوات أعمدة صغيرة جداً (~60-85px) قريبة جداً من فجوات
+    النثر ففشلت لاحقاً في التمييز، ونسخة أخرى استخدمت فجوة "Femoral"→"Neck" شبه
+    صفرية (3px) غير واقعية أصلاً."""
     words = []
     if include_surrounding_paragraph:
         for text, x0, x1 in [
-            ("Patient:", 50, 110), ("Jane", 115, 145), ("Doe,", 150, 180),
-            ("DOB", 185, 215), ("1985-03-12", 220, 300),
+            ("Patient:", 50, 110), ("Jane", 128, 158), ("Doe,", 176, 206),
+            ("DOB", 224, 254), ("1985-03-12", 272, 352),
         ]:
             words.append(_vision_word(text, x0, x1, 50, 65))
-    for text, x0, x1 in [("Region", 100, 160), ("BMD", 220, 250), ("T-Score", 320, 380), ("Z-Score", 440, 500)]:
+    for text, x0, x1 in [("Region", 100, 160), ("BMD", 400, 435), ("T-Score", 600, 660), ("Z-Score", 900, 960)]:
         words.append(_vision_word(text, x0, x1, 120, 135))
-    for text, x0, x1 in [("L1-L4", 100, 150), ("0.912", 225, 260), ("-1.2", 330, 360), ("-0.5", 445, 470)]:
+    for text, x0, x1 in [("L1-L4", 100, 150), ("0.912", 410, 445), ("-1.2", 610, 640), ("-0.5", 910, 935)]:
         words.append(_vision_word(text, x0, x1, 150, 165))
     for text, x0, x1 in [
-        ("Femoral", 90, 140), ("Neck", 143, 170), ("0.850", 225, 260), ("-1.8", 330, 360), ("-1.1", 445, 470),
+        ("Femoral", 90, 140), ("Neck", 158, 183), ("0.850", 410, 445), ("-1.8", 610, 640), ("-1.1", 910, 935),
     ]:
         words.append(_vision_word(text, x0, x1, 180, 195))
     return words
@@ -428,8 +434,9 @@ class TestVisionWordBoxes(unittest.TestCase):
 
 class TestDetectScannedTableRegions(unittest.TestCase):
     """اكتشاف جداول الصفحات الممسوحة هندسياً (بلا أي كيان "جدول" من Vision نفسه) —
-    انظر توثيق `_detect_scanned_table_regions` لسبب استخدام أضيق فجوة في الصفحة (وليس
-    الوسيط) كمرجع للتفاوت بين الأعمدة."""
+    انظر توثيق `_find_gap_threshold`/`_detect_scanned_table_regions` لتاريخ التطوير
+    (وسيط ← أضيق فجوة ← أكبر قفزة نسبية ← أول قفزة نسبية بدءاً من الأسفل، كل خطوة
+    كانت رداً على فشل حقيقي مُلاحَظ ضد Vision API فعلي وليس افتراضياً)."""
 
     def test_detects_dexa_table_alongside_surrounding_paragraph(self):
         regions = ingest_module._detect_scanned_table_regions(_dexa_style_words(include_surrounding_paragraph=True))
@@ -445,13 +452,29 @@ class TestDetectScannedTableRegions(unittest.TestCase):
         )
 
     def test_detects_dexa_table_when_page_is_almost_entirely_tabular(self):
-        # حالة أصعب: بلا أي نص عادي محيط على الإطلاق — لو استُخدم الوسيط العام
-        # لفجوات الصفحة كمرجع (بدل الأضيق) لفشل الاكتشاف هنا (تحقّقنا من هذا فعلياً
-        # أثناء التطوير قبل التحويل لمنطق "أضيق فجوة").
         regions = ingest_module._detect_scanned_table_regions(_dexa_style_words(include_surrounding_paragraph=False))
 
         self.assertEqual(len(regions), 1)
         self.assertEqual(regions[0]["rows"][0], ["Region", "BMD", "T-Score", "Z-Score"])
+
+    def test_two_unrelated_tables_separated_by_whitespace_are_not_merged(self):
+        # اختبار مبني على خلل حقيقي اكتُشف عبر ملف مريض حقيقي: جدول DEXA رئيسي
+        # يتبعه مباشرة (بلا سطر نثر يفصل بينهما في قائمة الأسطر) جدول مرجعي مختلف
+        # تماماً (معايير WHO)، بمسافة رأسية بيضاء واضحة أكبر من التباعد المعتاد بين
+        # أسطر الصفحة — يجب أن يُكتشَفا كمنطقتين منفصلتين، لا منطقة واحدة ملتحمة.
+        words = _dexa_style_words(include_surrounding_paragraph=False)
+        normal_line_spacing = 30  # يطابق التباعد بين أسطر الجدول الأول (top=120/150/180)
+        second_table_top = 180 + 15 + normal_line_spacing * 6  # فجوة أكبر بكثير من المعتاد
+        for text, x0, x1 in [("Normal", 100, 160), ("Range", 400, 460)]:
+            words.append(_vision_word(text, x0, x1, second_table_top, second_table_top + 15))
+        for text, x0, x1 in [("Elevated", 100, 170), ("High", 400, 450)]:
+            words.append(_vision_word(text, x0, x1, second_table_top + normal_line_spacing, second_table_top + normal_line_spacing + 15))
+
+        regions = ingest_module._detect_scanned_table_regions(words)
+
+        self.assertEqual(len(regions), 2)
+        self.assertEqual(regions[0]["rows"][0], ["Region", "BMD", "T-Score", "Z-Score"])
+        self.assertEqual(regions[1]["rows"], [["Normal", "Range"], ["Elevated", "High"]])
 
     def test_plain_prose_page_yields_no_false_positive_table(self):
         words = []

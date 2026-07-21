@@ -69,6 +69,21 @@ class TestExportDocx(unittest.TestCase):
             with zf.open("images/Image_01.png") as f:
                 self.assertEqual(f.read(), b"hello")
 
+    def test_arabic_file_name_does_not_crash_response_headers(self):
+        # اسم ملف عربي (شائع جداً لملفات المستخدم الفعلية) كان يمر دون تغيير عبر
+        # `_safe_file_name` (لأن `\w` في Python يطابق يونيكود أيضاً)، فيُسبِّب
+        # UnicodeEncodeError عند وضعه في ترويسة Content-Disposition (يجب أن تكون
+        # latin-1) — اختُبِر هذا الخطأ فعلياً عبر الواجهة الحية قبل إصلاحه.
+        content = {"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Hi"}]}]}
+
+        response = self.client.post(
+            "/export-docx",
+            json={"content": content, "file_name": "تقرير_DEXA_للمريضة", "images": []},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        response.headers["content-disposition"]  # لا يرفع استثناءً عند الوصول إليها
+
 
 if __name__ == "__main__":
     unittest.main()

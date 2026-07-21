@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import random
+import statistics
 import time
 from functools import lru_cache
 from io import BytesIO
@@ -72,9 +73,18 @@ _VISION_MIN_JPEG_QUALITY = 40
 # من أسطر متتالية له هذا الحد الأدنى من الأسطر/الخلايا يُعتبر "منطقة جدول" مرشَّحة.
 _SCANNED_TABLE_MIN_ROWS = 2
 _SCANNED_TABLE_MIN_COLS = 2
-# أصغر قفزة نسبية بين فجوتين متتاليتين (مُرتَّبتين) تُعتبر انفصالاً حقيقياً بين
-# "تباعد كلمات عادي" و"فجوة عمود جدول" — انظر `_find_gap_threshold`.
-_SCANNED_TABLE_MIN_JUMP_RATIO = 2.5
+# أصغر قفزة نسبية بين فجوتين متتاليتين (مُرتَّبتين، بعد تجاهل ما دون
+# `_SCANNED_TABLE_MIN_GAP_FOR_RATIO_CHECK`) تُعتبر انفصالاً حقيقياً بين "تباعد كلمات
+# عادي" و"فجوة عمود جدول" — انظر `_find_gap_threshold`.
+_SCANNED_TABLE_MIN_JUMP_RATIO = 2.0
+# فجوات أصغر من هذا (بالبكسل) تُستبعَد من فحص القفزة النسبية — عند هذا المقياس
+# الضئيل تهيمن ضجة تقريب bbox (1px مقابل 2px نسبتها 2x رغم كونه فرقاً تافهاً)، لا
+# تباعد حقيقي مقصود.
+_SCANNED_TABLE_MIN_GAP_FOR_RATIO_CHECK = 5.0
+# انقطاع تسلسل الجدول رأسياً: فجوة بين سطرين متتاليين أكبر من هذا المعامل × التباعد
+# الرأسي المعتاد بين أسطر الصفحة (median) تعني على الأرجح جدولاً مختلفاً/قسماً جديداً
+# بمسافة بيضاء واضحة، وليس صفاً تالياً لنفس الجدول — انظر `_detect_scanned_table_regions`.
+_SCANNED_TABLE_MAX_VERTICAL_GAP_RATIO = 2.5
 
 logger = logging.getLogger(__name__)
 
@@ -610,38 +620,58 @@ def _split_line_into_cells(line: List[dict], gap_threshold: float) -> List[str]:
 
 def _find_gap_threshold(gaps: List[float]) -> float:
     """يحدّد عتبة الفصل بين "تباعد عادي بين كلمتين" و"فجوة عمود جدول حقيقية" عبر
-    البحث عن أكبر قفزة نسبية (ratio) بين قيمتين متتاليتين في قائمة الفجوات مُرتَّبة
-    تصاعدياً — تقسيم ثنائي المنوال أحادي البُعد (1D bimodal split)، وليس وسيطاً أو
-    أضيق قيمة على مستوى الصفحة كلها.
+    البحث عن *أول* قفزة نسبية (ratio) ≥ `_SCANNED_TABLE_MIN_JUMP_RATIO` بين قيمتين
+    متتاليتين في قائمة الفجوات مُرتَّبة تصاعدياً (بدءاً من الأصغر) — وليس أكبر قفزة
+    في القائمة كلها، ولا وسيطاً، ولا أضيق قيمة على مستوى الصفحة.
 
-    **درس مهم من اختبار حقيقي (وليس افتراضياً):** جُرِّب أولاً "أضيق فجوة × معامل
-    ثابت" (لتفادي مشكلة الوسيط المذكورة أدناه)، لكنه فشل عملياً على OCR حقيقي —
-    Vision يفصل علامات الترقيم الملتصقة ("Patient" عن ":"، "Doe" عن ",") بفجوة شبه
-    صفرية، فتُصبح العتبة المشتقة صغيرة جداً وتُصنِّف كل سطر نثر عادي كجدول. تجربة
-    "الوسيط" وحدها فشلت أيضاً بسبب سيناريو معاكس: صفحة غالبها جدول (قليل نص عادي
-    محيط) تجعل الوسيط نفسه فجوة عمود كبيرة. القفزة النسبية الكبرى تتجاوز كلا
-    الفخّين لأنها لا تعتمد على "نسبة" الجدول من الصفحة ولا على قيمة متطرفة واحدة —
-    فقط على وجود فجوة حقيقية بين مجموعتين (فجوات ضيقة كثيرة، ثم فجوات عمود كبيرة
-    قليلة)، وهذا ما لوحظ فعلياً: فجوات نثر/داخل الخلية ≤24px مقابل فجوات أعمدة
-    ≥131px في اختبار حقيقي عبر Vision API الفعلي.
+    **دروس من اختبارَين حقيقيَّين متتاليَين (وليسا افتراضيَّين):**
+    1. "أضيق فجوة × معامل ثابت" فشل: Vision يفصل الترقيم الملتصق ("Patient" عن ":")
+       بفجوة شبه صفرية، فتُصبح العتبة صغيرة جداً وتُصنَّف كل نثر عادي كجدول.
+    2. "أكبر قفزة نسبية في كامل القائمة" فشل بدوره على مستند حقيقي أعقد (تقرير طبي
+       فيه عدة "جداول"/أزواج حقول متفاوتة الاتساع: حقول ترويسة ~1000px+، جدول
+       بيانات رئيسي ~400-900px، جدول مرجعي ثانٍ ~1700px+) — القفزة الأكبر فعلياً قد
+       تقع بين مجموعتين من الفجوات الكبيرة نفسها (لا علاقة لها بالحد الحقيقي بين
+       "عادي" و"كبير")، فلا يُقسَّم أي سطر إطلاقاً. الحل: أول قفزة تتجاوز العتبة
+       بدءاً من الأسفل تكفي — لا يهم أن تتفاوت الفجوات "الكبيرة" فيما بينها (400 أو
+       1700، كلاهما "كبير" بما يكفي)، المهم فقط تمييزها عن "الصغيرة" أسفل القائمة.
 
-    إن لم تتجاوز أكبر قفزة `_SCANNED_TABLE_MIN_JUMP_RATIO` (لا انفصال واضح بين
-    مجموعتين، على الأرجح لا يوجد جدول أصلاً) تُعاد `inf` فلا ينقسم أي سطر."""
-    positive = sorted(g for g in gaps if g > 0)
+    فجوات أصغر من `_SCANNED_TABLE_MIN_GAP_FOR_RATIO_CHECK` تُستبعَد من الفحص (ضجة
+    تقريب bbox، ليست تباعداً مقصوداً — بدونه، قفزة تافهة مثل 1px→2px "تضاعفت" رياضياً
+    فتُطلق عتبة صغيرة جداً خطأً). إن لم تتحقق أي قفزة كافية تُعاد `inf` فلا ينقسم
+    أي سطر (على الأرجح لا يوجد جدول أصلاً)."""
+    positive = sorted(g for g in gaps if g >= _SCANNED_TABLE_MIN_GAP_FOR_RATIO_CHECK)
     if len(positive) < 2:
         return float("inf")
 
-    best_ratio = 1.0
-    best_index = -1
     for i in range(len(positive) - 1):
         ratio = positive[i + 1] / max(positive[i], 1.0)
-        if ratio > best_ratio:
-            best_ratio = ratio
-            best_index = i
+        if ratio >= _SCANNED_TABLE_MIN_JUMP_RATIO:
+            return (positive[i] + positive[i + 1]) / 2
 
-    if best_index < 0 or best_ratio < _SCANNED_TABLE_MIN_JUMP_RATIO:
-        return float("inf")
-    return (positive[best_index] + positive[best_index + 1]) / 2
+    return float("inf")
+
+
+def _append_table_region(
+    regions: List[dict], lines: List[List[dict]], line_cells: List[List[str]], start: int, end: int
+) -> None:
+    """يُضيف منطقة جدول من `lines[start:end]` إن كانت ≥`_SCANNED_TABLE_MIN_ROWS` سطراً —
+    مُستخرَجة كدالة مستقلة لأن `_detect_scanned_table_regions` يحتاج استدعاءها من أكثر
+    من مكان في حلقة بناء التسلسلات (كسر التسلسل بسبب سطر غير جدولي، أو بسبب فجوة
+    رأسية كبيرة، ونهاية الصفحة)."""
+    if end - start < _SCANNED_TABLE_MIN_ROWS:
+        return
+    region_lines = lines[start:end]
+    regions.append(
+        {
+            "rows": line_cells[start:end],
+            "bbox": BoundingBox(
+                x0=min(w["x0"] for ln in region_lines for w in ln),
+                y0=min(w["top"] for ln in region_lines for w in ln),
+                x1=max(w["x1"] for ln in region_lines for w in ln),
+                y1=max(w["bottom"] for ln in region_lines for w in ln),
+            ),
+        }
+    )
 
 
 def _detect_scanned_table_regions(words: List[dict]) -> List[dict]:
@@ -651,45 +681,50 @@ def _detect_scanned_table_regions(words: List[dict]) -> List[dict]:
 
     الخطوات: تجميع الكلمات في أسطر حسب تداخل الموضع الرأسي (`_cluster_lines`، نفس
     الدالة المستخدَمة للصفحات الرقمية)، ثم تقسيم كل سطر لخلايا عند فجوات أفقية أكبر
-    من عتبة القفزة الثنائية المنوال (`_find_gap_threshold`، انظر توثيقها للسبب).
+    من عتبة `_find_gap_threshold` (انظر توثيقها للسبب).
 
     أي تسلسل من ≥`_SCANNED_TABLE_MIN_ROWS` سطر متتالٍ له ≥`_SCANNED_TABLE_MIN_COLS`
-    خلية في كل سطر يُعتبر "منطقة جدول" مرشَّحة. يطابق هذا واقع تقارير المختبر/DEXA
-    الممسوحة: كل سطر = صف بيانات (Test/Result/Unit/Range أو Region/BMD/T-Score/Z-Score)
-    مفصول بفراغات واسعة بين القيم."""
+    خلية في كل سطر يُعتبر "منطقة جدول" مرشَّحة — **بشرط استمرار رأسي** أيضاً: إن
+    كانت الفجوة الرأسية بين سطرين متتاليين أكبر من `_SCANNED_TABLE_MAX_VERTICAL_GAP_RATIO`
+    ضِعف التباعد المعتاد بين أسطر الصفحة (median)، يُقطَع التسلسل ويبدأ آخر جديد —
+    **درس من اختبار حقيقي:** تقرير طبي فيه جدول بيانات رئيسي (BMD/T-Score/Z-Score)
+    يتبعه مباشرة (بلا سطر نثر فاصل بينهما) جدول مرجعي مختلف تماماً (معايير WHO
+    التشخيصية) بمسافة بيضاء واضحة بينهما فقط — بدون هذا الشرط يلتحم الجدولان في
+    "منطقة" واحدة ضخمة غير صحيحة."""
     if not words:
         return []
 
     lines = [sorted(line, key=lambda w: w["x0"]) for line in _cluster_lines(words)]
     lines.sort(key=lambda line: min(w["top"] for w in line))
 
-    gaps = [curr["x0"] - prev["x1"] for line in lines for prev, curr in zip(line, line[1:])]
-    gap_threshold = _find_gap_threshold(gaps)
-
+    horizontal_gaps = [curr["x0"] - prev["x1"] for line in lines for prev, curr in zip(line, line[1:])]
+    gap_threshold = _find_gap_threshold(horizontal_gaps)
     line_cells = [_split_line_into_cells(line, gap_threshold) for line in lines]
+
+    line_tops = [min(w["top"] for w in line) for line in lines]
+    line_bottoms = [max(w["bottom"] for w in line) for line in lines]
+    vertical_gaps = [
+        line_tops[i] - line_bottoms[i - 1] for i in range(1, len(lines)) if line_tops[i] > line_bottoms[i - 1]
+    ]
+    median_vertical_gap = statistics.median(vertical_gaps) if vertical_gaps else 0.0
+    max_allowed_vertical_gap = (
+        median_vertical_gap * _SCANNED_TABLE_MAX_VERTICAL_GAP_RATIO if median_vertical_gap > 0 else float("inf")
+    )
 
     regions: List[dict] = []
     run_start = None
-    # حارس أخير [[]] لإغلاق أي تسلسل جدول مفتوح حتى نهاية الصفحة دون تكرار منطق الإغلاق.
-    for index, cells in enumerate(line_cells + [[]]):
+    for index, cells in enumerate(line_cells):
         is_tabular = len(cells) >= _SCANNED_TABLE_MIN_COLS
-        if is_tabular and run_start is None:
-            run_start = index
-        elif not is_tabular and run_start is not None:
-            if index - run_start >= _SCANNED_TABLE_MIN_ROWS:
-                region_lines = lines[run_start:index]
-                regions.append(
-                    {
-                        "rows": line_cells[run_start:index],
-                        "bbox": BoundingBox(
-                            x0=min(w["x0"] for ln in region_lines for w in ln),
-                            y0=min(w["top"] for ln in region_lines for w in ln),
-                            x1=max(w["x1"] for ln in region_lines for w in ln),
-                            y1=max(w["bottom"] for ln in region_lines for w in ln),
-                        ),
-                    }
-                )
+        continues_run = run_start is not None and (line_tops[index] - line_bottoms[index - 1]) <= max_allowed_vertical_gap
+        if is_tabular and run_start is not None and continues_run:
+            continue
+        if run_start is not None:
+            _append_table_region(regions, lines, line_cells, run_start, index)
             run_start = None
+        if is_tabular:
+            run_start = index
+    if run_start is not None:
+        _append_table_region(regions, lines, line_cells, run_start, len(line_cells))
 
     return regions
 
