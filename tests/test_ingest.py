@@ -1,9 +1,11 @@
+import json
 import os
 import tempfile
 import unittest
 from io import BytesIO
 from unittest.mock import Mock, patch
 
+import dspy
 import fitz
 import requests
 from PIL import Image
@@ -359,6 +361,262 @@ class TestBlocksFromVisionPage(unittest.TestCase):
     def test_empty_paragraph_text_is_skipped(self):
         vision_page = {"blocks": [{"paragraphs": [{"words": []}]}]}
         self.assertEqual(_blocks_from_vision_page(vision_page), [])
+
+
+def _vision_word(text, x0, x1, top, bottom):
+    """يبني dict كلمة بنفس شكل مخرَج `_vision_word_boxes` مباشرة (للاختبارات التي
+    تفحص التجميع الهندسي دون المرور عبر JSON استجابة Vision كاملة)."""
+    return {"text": text, "x0": x0, "x1": x1, "top": top, "bottom": bottom}
+
+
+def _dexa_style_words(include_surrounding_paragraph: bool) -> list:
+    """يبني كلمات جدول DEXA اصطناعي (Region/BMD/T-Score/Z-Score) بفجوات أفقية واسعة
+    بين الأعمدة، مع خيار تضمين سطر نص عادي محيط (لاختبار عدم التأثر بنسبة الجدول من
+    الصفحة — انظر توثيق `_detect_scanned_table_regions`)."""
+    words = []
+    if include_surrounding_paragraph:
+        for text, x0, x1 in [
+            ("Patient:", 50, 110), ("Jane", 115, 145), ("Doe,", 150, 180),
+            ("DOB", 185, 215), ("1985-03-12", 220, 300),
+        ]:
+            words.append(_vision_word(text, x0, x1, 50, 65))
+    for text, x0, x1 in [("Region", 100, 160), ("BMD", 220, 250), ("T-Score", 320, 380), ("Z-Score", 440, 500)]:
+        words.append(_vision_word(text, x0, x1, 120, 135))
+    for text, x0, x1 in [("L1-L4", 100, 150), ("0.912", 225, 260), ("-1.2", 330, 360), ("-0.5", 445, 470)]:
+        words.append(_vision_word(text, x0, x1, 150, 165))
+    for text, x0, x1 in [
+        ("Femoral", 90, 140), ("Neck", 143, 170), ("0.850", 225, 260), ("-1.8", 330, 360), ("-1.1", 445, 470),
+    ]:
+        words.append(_vision_word(text, x0, x1, 180, 195))
+    return words
+
+
+class TestVisionWordBoxes(unittest.TestCase):
+    def test_extracts_word_text_and_pixel_bbox(self):
+        vision_page = {
+            "blocks": [
+                {
+                    "paragraphs": [
+                        {
+                            "words": [
+                                {
+                                    "symbols": [{"text": "B"}, {"text": "P"}],
+                                    "boundingBox": {
+                                        "vertices": [
+                                            {"x": 10, "y": 20}, {"x": 30, "y": 20},
+                                            {"x": 30, "y": 40}, {"x": 10, "y": 40},
+                                        ]
+                                    },
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+
+        words = ingest_module._vision_word_boxes(vision_page)
+
+        self.assertEqual(len(words), 1)
+        self.assertEqual(words[0]["text"], "BP")
+        self.assertEqual((words[0]["x0"], words[0]["top"], words[0]["x1"], words[0]["bottom"]), (10, 20, 30, 40))
+
+    def test_word_without_bounding_box_is_skipped(self):
+        vision_page = {"blocks": [{"paragraphs": [{"words": [{"symbols": [{"text": "X"}]}]}]}]}
+        self.assertEqual(ingest_module._vision_word_boxes(vision_page), [])
+
+
+class TestDetectScannedTableRegions(unittest.TestCase):
+    """اكتشاف جداول الصفحات الممسوحة هندسياً (بلا أي كيان "جدول" من Vision نفسه) —
+    انظر توثيق `_detect_scanned_table_regions` لسبب استخدام أضيق فجوة في الصفحة (وليس
+    الوسيط) كمرجع للتفاوت بين الأعمدة."""
+
+    def test_detects_dexa_table_alongside_surrounding_paragraph(self):
+        regions = ingest_module._detect_scanned_table_regions(_dexa_style_words(include_surrounding_paragraph=True))
+
+        self.assertEqual(len(regions), 1)
+        self.assertEqual(
+            regions[0]["rows"],
+            [
+                ["Region", "BMD", "T-Score", "Z-Score"],
+                ["L1-L4", "0.912", "-1.2", "-0.5"],
+                ["Femoral Neck", "0.850", "-1.8", "-1.1"],
+            ],
+        )
+
+    def test_detects_dexa_table_when_page_is_almost_entirely_tabular(self):
+        # حالة أصعب: بلا أي نص عادي محيط على الإطلاق — لو استُخدم الوسيط العام
+        # لفجوات الصفحة كمرجع (بدل الأضيق) لفشل الاكتشاف هنا (تحقّقنا من هذا فعلياً
+        # أثناء التطوير قبل التحويل لمنطق "أضيق فجوة").
+        regions = ingest_module._detect_scanned_table_regions(_dexa_style_words(include_surrounding_paragraph=False))
+
+        self.assertEqual(len(regions), 1)
+        self.assertEqual(regions[0]["rows"][0], ["Region", "BMD", "T-Score", "Z-Score"])
+
+    def test_plain_prose_page_yields_no_false_positive_table(self):
+        words = []
+        y = 50
+        for line in [
+            "This is a normal paragraph sentence with several words in it.",
+            "Here is another line of plain prose text following the first one.",
+            "And a third line to make sure no false table is detected here.",
+        ]:
+            x = 50
+            for token in line.split(" "):
+                width = len(token) * 6
+                words.append(_vision_word(token, x, x + width, y, y + 15))
+                x += width + 5
+            y += 25
+
+        self.assertEqual(ingest_module._detect_scanned_table_regions(words), [])
+
+    def test_single_row_is_not_enough_to_count_as_a_table(self):
+        words = [
+            _vision_word("Region", 100, 160, 120, 135),
+            _vision_word("BMD", 220, 250, 120, 135),
+        ]
+        self.assertEqual(ingest_module._detect_scanned_table_regions(words), [])
+
+
+class TestStructureScannedTableRows(unittest.TestCase):
+    def test_returns_none_when_lm_not_configured(self):
+        # بيئة الاختبار بلا GEMINI_API_KEY أصلاً (نفس افتراض بقية هذا الملف)، لذا
+        # dspy.settings.lm يبقى None طوال تشغيل المجموعة كاملة.
+        self.assertIsNone(dspy.settings.lm)
+        self.assertIsNone(ingest_module._structure_scanned_table_rows([["Region", "BMD"], ["L1-L4", "0.912"]]))
+
+    def test_parses_structured_dicts_into_flat_corrected_rows_when_lm_configured(self):
+        raw_rows = [["Regoin", "BMD"], ["L1-L4", "0.912"]]
+        fake_structurer = Mock(
+            return_value=Mock(
+                structured_rows=json.dumps(
+                    [{"Region": "Region", "BMD": "BMD"}, {"Region": "L1-L4", "BMD": "0.912"}]
+                )
+            )
+        )
+        original_lm = dspy.settings.lm
+        dspy.settings.lm = "fake-lm-for-test"
+        try:
+            with patch.object(ingest_module, "_get_table_structurer", return_value=fake_structurer):
+                result = ingest_module._structure_scanned_table_rows(raw_rows)
+        finally:
+            dspy.settings.lm = original_lm
+
+        self.assertEqual(result, [["Region", "BMD"], ["L1-L4", "0.912"]])
+
+    def test_falls_back_to_none_when_row_count_mismatches(self):
+        raw_rows = [["Region", "BMD"], ["L1-L4", "0.912"]]
+        fake_structurer = Mock(return_value=Mock(structured_rows=json.dumps([{"Region": "Region", "BMD": "BMD"}])))
+        original_lm = dspy.settings.lm
+        dspy.settings.lm = "fake-lm-for-test"
+        try:
+            with patch.object(ingest_module, "_get_table_structurer", return_value=fake_structurer):
+                result = ingest_module._structure_scanned_table_rows(raw_rows)
+        finally:
+            dspy.settings.lm = original_lm
+
+        self.assertIsNone(result)
+
+    def test_falls_back_to_none_when_lm_call_raises(self):
+        fake_structurer = Mock(side_effect=RuntimeError("network error"))
+        original_lm = dspy.settings.lm
+        dspy.settings.lm = "fake-lm-for-test"
+        try:
+            with patch.object(ingest_module, "_get_table_structurer", return_value=fake_structurer):
+                result = ingest_module._structure_scanned_table_rows([["Region"], ["L1-L4"]])
+        finally:
+            dspy.settings.lm = original_lm
+
+        self.assertIsNone(result)
+
+
+class TestScannedTableBlocks(unittest.TestCase):
+    def test_builds_table_block_with_raw_grid_when_lm_unconfigured(self):
+        blocks = ingest_module._scanned_table_blocks(_dexa_style_words(include_surrounding_paragraph=True))
+
+        self.assertEqual(len(blocks), 1)
+        block = blocks[0]
+        self.assertEqual(block.block_type, BlockType.TABLE)
+        self.assertEqual(block.source_engine, SourceEngine.GOOGLE_VISION)
+        self.assertEqual(block.rows, block.raw_rows)
+        self.assertEqual(block.rows[0], ["Region", "BMD", "T-Score", "Z-Score"])
+
+
+class TestScannedPageTableIntegration(unittest.TestCase):
+    """اختبار تكامل كامل: `_scanned_page_blocks_vision` يجب أن يبني Block(TABLE) واحداً
+    من الجدول ويستبعد نصه من الفقرات العادية (بلا تكرار)، مع بقاء ترتيب القراءة صحيحاً
+    (الفقرة قبل الجدول)."""
+
+    @patch("medical_ocr.ingest._call_vision_api")
+    def test_table_extracted_once_without_duplicating_paragraph_text(self, mock_call_vision_api):
+        words = _dexa_style_words(include_surrounding_paragraph=True)
+
+        def make_word(w):
+            return {
+                "symbols": [{"text": ch} for ch in w["text"]],
+                "boundingBox": {
+                    "vertices": [
+                        {"x": w["x0"], "y": w["top"]}, {"x": w["x1"], "y": w["top"]},
+                        {"x": w["x1"], "y": w["bottom"]}, {"x": w["x0"], "y": w["bottom"]},
+                    ]
+                },
+                "confidence": 0.95,
+            }
+
+        # سطر الفقرة العادية بمفرده كـparagraph منفصل عن كلمات الجدول، بنفس التقسيم
+        # الحقيقي الذي يعطيه Vision (فقرة لكل سطر هنا لتبسيط الاختبار).
+        para_words = [w for w in words if w["text"] in ("Patient:", "Jane", "Doe,", "DOB", "1985-03-12")]
+        table_words = [w for w in words if w not in para_words]
+
+        def paragraph_from(ws):
+            xs0 = min(w["x0"] for w in ws)
+            xs1 = max(w["x1"] for w in ws)
+            ys0 = min(w["top"] for w in ws)
+            ys1 = max(w["bottom"] for w in ws)
+            return {
+                "boundingBox": {
+                    "vertices": [
+                        {"x": xs0, "y": ys0}, {"x": xs1, "y": ys0}, {"x": xs1, "y": ys1}, {"x": xs0, "y": ys1},
+                    ]
+                },
+                "words": [make_word(w) for w in ws],
+            }
+
+        # كل سطر جدول فقرة Vision منفصلة (واقعي: Vision يقسّم كل سطر لفقرة عادة).
+        table_lines = {}
+        for w in table_words:
+            table_lines.setdefault(w["top"], []).append(w)
+
+        vision_page = {
+            "blocks": [
+                {
+                    "paragraphs": [paragraph_from(para_words)]
+                    + [paragraph_from(line_words) for line_words in table_lines.values()]
+                }
+            ]
+        }
+        mock_call_vision_api.return_value = {"fullTextAnnotation": {"pages": [vision_page]}}
+
+        # صفحة fitz حقيقية (فارغة) فقط لتوليد raster حقيقي يمرّ عبر
+        # `_compress_image_to_limit` بدون أخطاء — استدعاء Vision API نفسه مموَّه أعلاه.
+        real_doc = fitz.open()
+        real_page = real_doc.new_page()
+        blocks = ingest_module._scanned_page_blocks_vision(real_page)
+        real_doc.close()
+
+        table_blocks = [b for b in blocks if b.block_type == BlockType.TABLE]
+        paragraph_blocks = [b for b in blocks if b.block_type == BlockType.PARAGRAPH]
+
+        self.assertEqual(len(table_blocks), 1)
+        self.assertEqual(table_blocks[0].rows[0], ["Region", "BMD", "T-Score", "Z-Score"])
+
+        # نص الجدول (مثال "BMD") يجب ألا يظهر مكرَّراً كفقرة منفصلة أيضاً.
+        paragraph_texts = " ".join(b.text for b in paragraph_blocks)
+        self.assertIn("Patient", paragraph_texts)
+        self.assertNotIn("T-Score", paragraph_texts)
+
+        # ترتيب القراءة: الفقرة (أعلى الصفحة) يجب أن تسبق الجدول في قائمة blocks.
+        self.assertLess(blocks.index(paragraph_blocks[0]), blocks.index(table_blocks[0]))
 
 
 if __name__ == "__main__":

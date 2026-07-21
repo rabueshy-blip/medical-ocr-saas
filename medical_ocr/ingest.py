@@ -12,23 +12,30 @@
 حرفاً تُعامَل الصفحة كرقمية (نص PyMuPDF + جداول pdfplumber، بلا أي OCR)، وإلا تُعامَل
 كممسوحة وتُمرَّر لـ Google Vision API كصورة (raster) لكامل الصفحة.
 
-ملاحظة نطاق: Vision API لا يكتشف بنية الجداول (صفوف/أعمدة) في الصفحات الممسوحة —
-DOCUMENT_TEXT_DETECTION يعطي فقرات (paragraphs) فقط، وليس خلايا جدول. لذا الصفحات
-الممسوحة تُستخرَج حالياً كفقرات (Block من نوع paragraph) بغضّ النظر عن وجود جدول
-مرئي فيها؛ اكتشاف الجداول الممسوحة يبقى بنداً مفتوحاً (PP-Structure/Table Transformer،
-القسم 3-ب-4 من plan.md) — الصفحات الرقمية غير متأثرة (جداولها عبر pdfplumber كما هي).
+ملاحظة نطاق (محدَّثة): Vision API (DOCUMENT_TEXT_DETECTION) لا يعطي كياناً اسمه "جدول"
+أصلاً — فقط نص + bbox في كل مستوى (page/block/paragraph/word/symbol)، بخلاف Google
+Document AI الذي لديه مُحلِّل جداول مخصَّص (لم يُعتمَد هنا، يتطلب تفعيل API/processor
+منفصل). بدلاً من ذلك، بنية الجدول (صفوف/أعمدة) في الصفحات الممسوحة تُكتشَف هندسياً من
+bbox كل كلمة (`_vision_word_boxes` + `_detect_scanned_table_regions`، نفس أسلوب
+`_dynamic_text_table_settings` للصفحات الرقمية لكن من كلمات OCR بدل pdfplumber)، ثم
+تُصحَّح تلقائياً عبر `MedicalTableStructurer` (القسم 3-ب-4 من plan.md — كان بلا مستدعٍ
+حتى الآن) قبل أن تصير Block(TABLE) حقيقياً. الصفحات الرقمية غير متأثرة (جداولها عبر
+pdfplumber كما هي).
 """
 
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import os
 import random
 import time
+from functools import lru_cache
 from io import BytesIO
 from typing import List, Optional, Set
 
+import dspy
 import fitz  # PyMuPDF
 import pdfplumber
 import requests
@@ -44,6 +51,7 @@ from .schema import (
     PageSource,
     SourceEngine,
 )
+from .signatures.tables import MedicalTableStructurer
 
 MIN_DIGITAL_CHARS = 20
 
@@ -59,6 +67,14 @@ _VISION_TIMEOUT_MAX_SECONDS = 90
 # exceeds the limit" وانتهاء مهلة الاتصال على شبكات بطيئة قبل الوصول للحد الرسمي أصلاً.
 _VISION_MAX_IMAGE_BYTES = 4 * 1024 * 1024
 _VISION_MIN_JPEG_QUALITY = 40
+
+# اكتشاف جداول الصفحات الممسوحة هندسياً (`_detect_scanned_table_regions`): أي تسلسل
+# من أسطر متتالية له هذا الحد الأدنى من الأسطر/الخلايا يُعتبر "منطقة جدول" مرشَّحة.
+_SCANNED_TABLE_MIN_ROWS = 2
+_SCANNED_TABLE_MIN_COLS = 2
+# أصغر قفزة نسبية بين فجوتين متتاليتين (مُرتَّبتين) تُعتبر انفصالاً حقيقياً بين
+# "تباعد كلمات عادي" و"فجوة عمود جدول" — انظر `_find_gap_threshold`.
+_SCANNED_TABLE_MIN_JUMP_RATIO = 2.5
 
 logger = logging.getLogger(__name__)
 
@@ -329,15 +345,25 @@ def _page_images(
     return images
 
 
+def _sort_blocks_by_position(blocks: List[Block]) -> List[Block]:
+    """يرتّب Blocks حسب الموضع الرأسي الحقيقي (bbox.y0) بدل ترتيب الاستخراج — ضروري
+    كلما جُمعت Blocks من مصادر مختلفة (فقرات + جداول + placeholders) لا تصل بترتيب
+    قراءة صحيح من تلقاء نفسها. Blocks بلا bbox (نادرة، مثال بلوك خطأ Vision API) تبقى
+    بترتيبها النسبي الأصلي عبر مفتاح ترتيب مستقر (fallback إلى ما لا نهاية + الفهرس
+    الأصلي)."""
+    ordered = sorted(
+        enumerate(blocks),
+        key=lambda pair: (pair[1].bbox.y0 if pair[1].bbox else float("inf"), pair[0]),
+    )
+    return [block for _, block in ordered]
+
+
 def _insert_image_placeholders(blocks: List[Block], page_images: List[ImageAsset]) -> List[Block]:
     """يدمج Blocks الصفحة (فقرات/جداول) مع Block نصي Placeholder واحد لكل صورة مكتشفة
-    في نفس الصفحة، ثم يعيد ترتيب الكل حسب الموضع الرأسي الحقيقي (bbox.y0) بدل الاعتماد
-    على ترتيب الاستخراج (كانت الجداول سابقاً تُلحَق دوماً بعد كل الفقرات بصرف النظر عن
-    موضعها الفعلي في الصفحة — هذا الترتيب الجديد ضروري هنا كي يظهر الـplaceholder في
-    موقعه الصحيح بين الفقرات، ويُصحّح كأثر جانبي مفيد ترتيب الجداول أيضاً).
-
-    Blocks بلا bbox (نادرة، مثال بلوك خطأ Vision API) تبقى بترتيبها النسبي الأصلي عبر
-    مفتاح ترتيب مستقر (fallback إلى ما لا نهاية + الفهرس الأصلي)."""
+    في نفس الصفحة، ثم يعيد ترتيبها بالموضع الحقيقي (كانت الجداول سابقاً تُلحَق دوماً
+    بعد كل الفقرات بصرف النظر عن موضعها الفعلي في الصفحة — هذا الترتيب ضروري هنا كي
+    يظهر الـplaceholder في موقعه الصحيح بين الفقرات، ويُصحّح كأثر جانبي مفيد ترتيب
+    الجداول أيضاً)."""
     placeholders = [
         Block(
             block_type=BlockType.PARAGRAPH,
@@ -349,12 +375,7 @@ def _insert_image_placeholders(blocks: List[Block], page_images: List[ImageAsset
         for image in page_images
         if image.bbox is not None
     ]
-    combined = blocks + placeholders
-    ordered = sorted(
-        enumerate(combined),
-        key=lambda pair: (pair[1].bbox.y0 if pair[1].bbox else float("inf"), pair[0]),
-    )
-    return [block for _, block in ordered]
+    return _sort_blocks_by_position(blocks + placeholders)
 
 
 def _scanned_page_blocks_easyocr(page: fitz.Page, dpi: int = 200) -> List[Block]:
@@ -549,12 +570,218 @@ def _call_vision_api(image_bytes: bytes) -> dict:
     )
 
 
-def _blocks_from_vision_page(vision_page: dict) -> List[Block]:
+def _vision_word_boxes(vision_page: dict) -> List[dict]:
+    """يستخرج كل word مع bbox (بالبكسل، بنفس نظام إحداثيات raster الصفحة المُرسَلة
+    لـVision) من fullTextAnnotation — مستوى تفصيل أعمق من `_blocks_from_vision_page`
+    (فقرات فقط). ضروري لاكتشاف بنية جدول هندسياً (صفوف/أعمدة) بنفس فكرة
+    `_dynamic_text_table_settings` للصفحات الرقمية (تجميع كلمات حسب الموضع)، لكن هنا
+    من كلمات OCR بدل pdfplumber — Vision لا يعطي كياناً اسمه "جدول" أصلاً (انظر توثيق
+    نطاق أعلى الملف)، فقط نص + bbox في كل مستوى (page/block/paragraph/word/symbol)."""
+    words: List[dict] = []
+    for block in vision_page.get("blocks", []):
+        for paragraph in block.get("paragraphs", []):
+            for word in paragraph.get("words", []):
+                text = "".join(s.get("text", "") for s in word.get("symbols", []))
+                if not text.strip():
+                    continue
+                vertices = word.get("boundingBox", {}).get("vertices", [])
+                if not vertices:
+                    continue
+                xs = [v.get("x", 0) for v in vertices]
+                ys = [v.get("y", 0) for v in vertices]
+                words.append({"text": text, "x0": min(xs), "x1": max(xs), "top": min(ys), "bottom": max(ys)})
+    return words
+
+
+def _split_line_into_cells(line: List[dict], gap_threshold: float) -> List[str]:
+    """يقسّم كلمات سطر واحد (مُرتَّبة x0) إلى خلايا عند أول فجوة أفقية أكبر من
+    gap_threshold — نفس الفكرة التي يتّبعها قارئ بشري لجدول مطبوع بلا خطوط فاصلة:
+    عمود جديد يبدأ حيث تتباعد الكلمات فجأة أكثر من التباعد العادي بين كلمتين بنفس
+    الخلية."""
+    cells = [line[0]["text"]]
+    for prev, curr in zip(line, line[1:]):
+        gap = curr["x0"] - prev["x1"]
+        if gap > gap_threshold:
+            cells.append(curr["text"])
+        else:
+            cells[-1] = f"{cells[-1]} {curr['text']}"
+    return cells
+
+
+def _find_gap_threshold(gaps: List[float]) -> float:
+    """يحدّد عتبة الفصل بين "تباعد عادي بين كلمتين" و"فجوة عمود جدول حقيقية" عبر
+    البحث عن أكبر قفزة نسبية (ratio) بين قيمتين متتاليتين في قائمة الفجوات مُرتَّبة
+    تصاعدياً — تقسيم ثنائي المنوال أحادي البُعد (1D bimodal split)، وليس وسيطاً أو
+    أضيق قيمة على مستوى الصفحة كلها.
+
+    **درس مهم من اختبار حقيقي (وليس افتراضياً):** جُرِّب أولاً "أضيق فجوة × معامل
+    ثابت" (لتفادي مشكلة الوسيط المذكورة أدناه)، لكنه فشل عملياً على OCR حقيقي —
+    Vision يفصل علامات الترقيم الملتصقة ("Patient" عن ":"، "Doe" عن ",") بفجوة شبه
+    صفرية، فتُصبح العتبة المشتقة صغيرة جداً وتُصنِّف كل سطر نثر عادي كجدول. تجربة
+    "الوسيط" وحدها فشلت أيضاً بسبب سيناريو معاكس: صفحة غالبها جدول (قليل نص عادي
+    محيط) تجعل الوسيط نفسه فجوة عمود كبيرة. القفزة النسبية الكبرى تتجاوز كلا
+    الفخّين لأنها لا تعتمد على "نسبة" الجدول من الصفحة ولا على قيمة متطرفة واحدة —
+    فقط على وجود فجوة حقيقية بين مجموعتين (فجوات ضيقة كثيرة، ثم فجوات عمود كبيرة
+    قليلة)، وهذا ما لوحظ فعلياً: فجوات نثر/داخل الخلية ≤24px مقابل فجوات أعمدة
+    ≥131px في اختبار حقيقي عبر Vision API الفعلي.
+
+    إن لم تتجاوز أكبر قفزة `_SCANNED_TABLE_MIN_JUMP_RATIO` (لا انفصال واضح بين
+    مجموعتين، على الأرجح لا يوجد جدول أصلاً) تُعاد `inf` فلا ينقسم أي سطر."""
+    positive = sorted(g for g in gaps if g > 0)
+    if len(positive) < 2:
+        return float("inf")
+
+    best_ratio = 1.0
+    best_index = -1
+    for i in range(len(positive) - 1):
+        ratio = positive[i + 1] / max(positive[i], 1.0)
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_index = i
+
+    if best_index < 0 or best_ratio < _SCANNED_TABLE_MIN_JUMP_RATIO:
+        return float("inf")
+    return (positive[best_index] + positive[best_index + 1]) / 2
+
+
+def _detect_scanned_table_regions(words: List[dict]) -> List[dict]:
+    """يكتشف مناطق شبيهة بجداول ضمن كلمات صفحة ممسوحة (OCR) عبر التجميع الهندسي
+    البحت فقط — Vision (DOCUMENT_TEXT_DETECTION) لا يعطي أي كيان "جدول" جاهز، فقط
+    نص + bbox (انظر توثيق نطاق أعلى الملف وتوثيق `_vision_word_boxes`).
+
+    الخطوات: تجميع الكلمات في أسطر حسب تداخل الموضع الرأسي (`_cluster_lines`، نفس
+    الدالة المستخدَمة للصفحات الرقمية)، ثم تقسيم كل سطر لخلايا عند فجوات أفقية أكبر
+    من عتبة القفزة الثنائية المنوال (`_find_gap_threshold`، انظر توثيقها للسبب).
+
+    أي تسلسل من ≥`_SCANNED_TABLE_MIN_ROWS` سطر متتالٍ له ≥`_SCANNED_TABLE_MIN_COLS`
+    خلية في كل سطر يُعتبر "منطقة جدول" مرشَّحة. يطابق هذا واقع تقارير المختبر/DEXA
+    الممسوحة: كل سطر = صف بيانات (Test/Result/Unit/Range أو Region/BMD/T-Score/Z-Score)
+    مفصول بفراغات واسعة بين القيم."""
+    if not words:
+        return []
+
+    lines = [sorted(line, key=lambda w: w["x0"]) for line in _cluster_lines(words)]
+    lines.sort(key=lambda line: min(w["top"] for w in line))
+
+    gaps = [curr["x0"] - prev["x1"] for line in lines for prev, curr in zip(line, line[1:])]
+    gap_threshold = _find_gap_threshold(gaps)
+
+    line_cells = [_split_line_into_cells(line, gap_threshold) for line in lines]
+
+    regions: List[dict] = []
+    run_start = None
+    # حارس أخير [[]] لإغلاق أي تسلسل جدول مفتوح حتى نهاية الصفحة دون تكرار منطق الإغلاق.
+    for index, cells in enumerate(line_cells + [[]]):
+        is_tabular = len(cells) >= _SCANNED_TABLE_MIN_COLS
+        if is_tabular and run_start is None:
+            run_start = index
+        elif not is_tabular and run_start is not None:
+            if index - run_start >= _SCANNED_TABLE_MIN_ROWS:
+                region_lines = lines[run_start:index]
+                regions.append(
+                    {
+                        "rows": line_cells[run_start:index],
+                        "bbox": BoundingBox(
+                            x0=min(w["x0"] for ln in region_lines for w in ln),
+                            y0=min(w["top"] for ln in region_lines for w in ln),
+                            x1=max(w["x1"] for ln in region_lines for w in ln),
+                            y1=max(w["bottom"] for ln in region_lines for w in ln),
+                        ),
+                    }
+                )
+            run_start = None
+
+    return regions
+
+
+@lru_cache(maxsize=1)
+def _get_table_structurer() -> MedicalTableStructurer:
+    return MedicalTableStructurer()
+
+
+def _structure_scanned_table_rows(raw_rows: List[List[str]]) -> Optional[List[List[str]]]:
+    """يستدعي MedicalTableStructurer (موديول DSPy موجود أصلاً لهذا الغرض بالضبط، القسم
+    3-ب-4 — كان بلا أي مستدعٍ لمُدخَل جدول ممسوح حتى الآن) لتصحيح/تسمية أعمدة جدول
+    ممسوح خام (Test/Result/Unit/Range، Region/BMD/T-Score/Z-Score، إلخ) قبل بناء جدول
+    Word حقيقي منه.
+
+    **قرار مستخدم صريح:** يعمل تلقائياً لكل جدول مُكتشَف أثناء `extract_document` (وليس
+    إجراءً يدوياً لكل جدول) — على عكس بقية `extract_document` المجانية عمداً؛ كل جدول
+    مُكتشَف = استدعاء LM واحد فعلي. يتدهور بأمان (يُعيد None) إن كان LM غير مُهيَّأ أصلاً
+    (`dspy.settings.lm is None`، شائع في تطوير محلي بلا GEMINI_API_KEY) أو فشل الاستدعاء
+    لأي سبب (شبكة/حصة/بوابة الترسيخ لم تتحقق) — فشل تصحيح جدول واحد لا يجب أن يوقف
+    استخراج بقية المستند، فيبقى الجدول بشبكته الخام غير المصحَّحة بدل رفع استثناء.
+
+    header hints: السطر الأول من raw_rows نفسه (وليس قائمة أسماء أعمدة طبية جاهزة
+    مُفترَضة سلفاً) — يطابق نمط الاستخدام الموثَّق فعلياً في `tests/test_signatures.py`
+    (raw_rows تتضمّن سطر الترويسة كصف عادي، والنموذج قد يصحّح نصه أيضاً)، ويبقي الكود
+    عاماً بدل افتراض مفردات ثابتة (Test/Result مقابل Region/BMD) لا تنطبق على كل تقرير."""
+    if dspy.settings.lm is None:
+        return None
+
+    try:
+        header_hints = raw_rows[0] if raw_rows else []
+        prediction = _get_table_structurer()(raw_rows=raw_rows, column_hints=header_hints)
+        structured = json.loads(prediction.structured_rows)
+    except Exception as exc:
+        logger.warning("فشل تصحيح جدول ممسوح عبر LM، استُخدمت الشبكة الخام بدلاً منه: %s", exc)
+        return None
+
+    if not isinstance(structured, list) or len(structured) != len(raw_rows):
+        logger.warning("استجابة LM لتصحيح الجدول غير متسقة (عدد صفوف مختلف)، استُخدمت الشبكة الخام")
+        return None
+    if not all(isinstance(row, dict) for row in structured):
+        logger.warning("استجابة LM لتصحيح الجدول بشكل غير متوقَّع (ليست list[dict])، استُخدمت الشبكة الخام")
+        return None
+
+    columns: List[str] = []
+    for row in structured:
+        for key in row.keys():
+            if key not in columns:
+                columns.append(key)
+
+    return [[str(row.get(col, "")) for col in columns] for row in structured]
+
+
+def _scanned_table_blocks(words: List[dict]) -> List[Block]:
+    """يبني Block(TABLE) واحداً لكل منطقة جدول مُكتشَفة هندسياً في صفحة ممسوحة، بعد
+    محاولة تصحيحها عبر LM (`_structure_scanned_table_rows`). `raw_rows` تبقى دوماً
+    الشبكة الخام قبل أي تصحيح (أثر تدقيق/audit trail، نفس مبدأ باقي المشروع) بصرف
+    النظر عن نجاح التصحيح — `confidence`/`source_engine` يعكسان أيّهما استُخدم فعلياً
+    في `rows`."""
+    blocks: List[Block] = []
+    for region in _detect_scanned_table_regions(words):
+        raw_rows = region["rows"]
+        structured_rows = _structure_scanned_table_rows(raw_rows)
+        if structured_rows is not None:
+            rows, confidence, source_engine = structured_rows, 0.85, SourceEngine.LLM_CORRECTED
+        else:
+            rows, confidence, source_engine = raw_rows, 0.5, SourceEngine.GOOGLE_VISION
+
+        blocks.append(
+            Block(
+                block_type=BlockType.TABLE,
+                rows=rows,
+                raw_rows=raw_rows,
+                bbox=region["bbox"],
+                confidence=confidence,
+                source_engine=source_engine,
+            )
+        )
+    return blocks
+
+
+def _blocks_from_vision_page(vision_page: dict, exclude_bboxes: Optional[List[tuple]] = None) -> List[Block]:
     """يحوّل صفحة واحدة من fullTextAnnotation.pages[i] إلى Blocks (فقرة لكل paragraph).
 
     تبسيط متعمد: يفصل بين الكلمات بمسافة واحدة دوماً بدل قراءة detectedBreak لكل رمز
     (type: SPACE/LINE_BREAK/EOL_SURE_SPACE) — كافٍ لعرض النص ولتصحيح DSPy اللاحق، وليس
-    الهدف إعادة بناء تنسيق مطابق للصفحة حرفياً."""
+    الهدف إعادة بناء تنسيق مطابق للصفحة حرفياً.
+
+    `exclude_bboxes` (جديد): فقرات مركزها داخل منطقة جدول مُكتشَفة (`_scanned_table_blocks`)
+    تُستبعَد كي لا يتكرر نصها هنا وكـBlock(TABLE) منفصل معاً — بنفس مبدأ استبعاد نص
+    خلايا الجدول عن الفقرات الرقمية في `_digital_page_blocks`."""
+    exclude_bboxes = exclude_bboxes or []
     blocks: List[Block] = []
     for block in vision_page.get("blocks", []):
         for paragraph in block.get("paragraphs", []):
@@ -579,6 +806,9 @@ def _blocks_from_vision_page(vision_page: dict) -> List[Block]:
                 ys = [v.get("y", 0) for v in vertices]
                 bbox = BoundingBox(x0=min(xs), y0=min(ys), x1=max(xs), y1=max(ys))
 
+            if bbox is not None and _bbox_center_in_any((bbox.x0, bbox.y0, bbox.x1, bbox.y1), exclude_bboxes):
+                continue
+
             if confidences:
                 confidence = sum(confidences) / len(confidences)
             else:
@@ -599,7 +829,14 @@ def _blocks_from_vision_page(vision_page: dict) -> List[Block]:
 def _scanned_page_blocks_vision(page: fitz.Page, dpi: int = 200) -> List[Block]:
     """محرك OCR الأساسي الحالي للصفحات الممسوحة: يرستر الصفحة كاملة إلى PNG، يضغطها تحت
     حد حجم Vision API عند الحاجة (`_compress_image_to_limit`)، ثم يمرّرها لـ Google
-    Vision API (DOCUMENT_TEXT_DETECTION)."""
+    Vision API (DOCUMENT_TEXT_DETECTION).
+
+    اكتشاف الجداول (جديد): يُستخرَج bbox كل كلمة (`_vision_word_boxes`) وتُكتشَف مناطق
+    شبيهة بجداول هندسياً (`_detect_scanned_table_regions`) — Vision نفسه لا يعطي كيان
+    جدول جاهزاً. كل منطقة مُكتشَفة تصير Block(TABLE) واحداً (بعد محاولة تصحيح عبر LM
+    تلقائياً، انظر `_structure_scanned_table_rows`)، والفقرات التي تقع داخل حدودها
+    تُستبعَد من الفقرات العادية لتفادي تكرار النص، ثم يُعاد ترتيب الجميع بالموضع
+    الحقيقي (`_sort_blocks_by_position`) بدل إلحاق الجداول دوماً في النهاية."""
     pixmap = page.get_pixmap(dpi=dpi)
     image_bytes = _compress_image_to_limit(pixmap.tobytes("png"))
 
@@ -610,7 +847,10 @@ def _scanned_page_blocks_vision(page: fitz.Page, dpi: int = 200) -> List[Block]:
 
     blocks: List[Block] = []
     for vision_page in full_text_annotation["pages"]:
-        blocks.extend(_blocks_from_vision_page(vision_page))
+        table_blocks = _scanned_table_blocks(_vision_word_boxes(vision_page))
+        table_bboxes = [(b.bbox.x0, b.bbox.y0, b.bbox.x1, b.bbox.y1) for b in table_blocks if b.bbox]
+        paragraph_blocks = _blocks_from_vision_page(vision_page, exclude_bboxes=table_bboxes)
+        blocks.extend(_sort_blocks_by_position(paragraph_blocks + table_blocks))
     return blocks
 
 
