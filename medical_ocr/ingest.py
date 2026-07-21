@@ -71,7 +71,13 @@ _VISION_MIN_JPEG_QUALITY = 40
 
 # اكتشاف جداول الصفحات الممسوحة هندسياً (`_detect_scanned_table_regions`): أي تسلسل
 # من أسطر متتالية له هذا الحد الأدنى من الأسطر/الخلايا يُعتبر "منطقة جدول" مرشَّحة.
-_SCANNED_TABLE_MIN_ROWS = 2
+# 3 وليس 2 عمداً: لوحظ فعلياً على ملف مريض حقيقي أن أزواج حقول الترويسة/التذييل
+# (مثال "NAME: ... FILE NO: ..." يتبعه "DATE: ... REF: ...", أو "Radiologist ...
+# / Dr.AMRO ... هاتف") تُنتِج جداول وهمية بصفّين فقط رغم أنها ليست بيانات سريرية
+# فعلية بل معلومات مريض/ترويسة يجب أن تبقى نصاً عادياً (طلب صريح: لا تُقحَم بيانات
+# المريض/الملاحظات الوصفية في خلايا جدول) — بينما كل جدول سريري حقيقي لوحظ (BMD،
+# معايير WHO) له ≥3 أسطر فعلية، فرفع الحد الأدنى يستبعد الزوجين الوهميين بأمان.
+_SCANNED_TABLE_MIN_ROWS = 3
 _SCANNED_TABLE_MIN_COLS = 2
 # أصغر قفزة نسبية بين فجوتين متتاليتين (مُرتَّبتين، بعد تجاهل ما دون
 # `_SCANNED_TABLE_MIN_GAP_FOR_RATIO_CHECK`) تُعتبر انفصالاً حقيقياً بين "تباعد كلمات
@@ -651,6 +657,37 @@ def _find_gap_threshold(gaps: List[float]) -> float:
     return float("inf")
 
 
+def _merge_split_header_row(rows: List[List[str]]) -> List[List[str]]:
+    """يدمج أول سطرين في منطقة جدول إن كان الثاني استمراراً لترويسة السطر الأول
+    بعدد خلايا أقل — مثال حقيقي (تقرير DEXA): "Site Region BMD Young Adult Age
+    Matched" يتبعه مباشرة "(gm/cm2) T-score Z-score" على سطر مطبوع منفصل، وهما
+    فعلياً ترويسة واحدة مقسّمة على سطرين، وليس صفّي بيانات مستقلَّين.
+
+    الدمج مُحاذًى لليمين (آخر عمود في السطر الثاني ↔ آخر عمود في الأول) لأن أعمدة
+    المعرِّفات الأولى (Site/Region) عادة لا تحمل سطر وحدات/تسمية فرعية، بخلاف أعمدة
+    القيم الأخيرة (BMD/T-Score/Z-Score) — نمط شائع في تقارير DEXA/المختبر. **بدون
+    هذا الدمج**، `MedicalTableStructurer` يُضطَر لملء "UNCERTAIN" في خلايا السطر
+    الثاني الأولى (لا بيانات حقيقية مقابلة لها)، فيظهر صف ترويسة إضافي مربك في
+    الجدول النهائي رغم أن كل قيمة رقمية فعلية محفوظة سليمة — لوحظ هذا حرفياً في
+    اختبار ضد ملف مريض حقيقي (تقرير DEXA)، والمستخدم وصفه بأن "بعض الأرقام تظهر
+    وبعضها لا".
+
+    يُطبَّق فقط على أول سطرين في المنطقة عمداً (وليس أي زوج سطرين متتاليين) — دمج
+    صفّي بيانات حقيقيَّين لمجرد نقص خلية عرضي في أحدهما كان سيُفسِد الجدول بدل
+    إصلاحه."""
+    if len(rows) < 2:
+        return rows
+    first, second = rows[0], rows[1]
+    if not second or not (0 < len(second) < len(first)):
+        return rows
+    pad = len(first) - len(second)
+    merged_first = list(first)
+    for i, value in enumerate(second):
+        idx = pad + i
+        merged_first[idx] = f"{merged_first[idx]} {value}".strip() if merged_first[idx] else value
+    return [merged_first] + rows[2:]
+
+
 def _append_table_region(
     regions: List[dict], lines: List[List[dict]], line_cells: List[List[str]], start: int, end: int
 ) -> None:
@@ -663,7 +700,7 @@ def _append_table_region(
     region_lines = lines[start:end]
     regions.append(
         {
-            "rows": line_cells[start:end],
+            "rows": _merge_split_header_row(line_cells[start:end]),
             "bbox": BoundingBox(
                 x0=min(w["x0"] for ln in region_lines for w in ln),
                 y0=min(w["top"] for ln in region_lines for w in ln),

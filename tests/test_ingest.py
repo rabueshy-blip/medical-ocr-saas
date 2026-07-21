@@ -465,16 +465,18 @@ class TestDetectScannedTableRegions(unittest.TestCase):
         words = _dexa_style_words(include_surrounding_paragraph=False)
         normal_line_spacing = 30  # يطابق التباعد بين أسطر الجدول الأول (top=120/150/180)
         second_table_top = 180 + 15 + normal_line_spacing * 6  # فجوة أكبر بكثير من المعتاد
-        for text, x0, x1 in [("Normal", 100, 160), ("Range", 400, 460)]:
-            words.append(_vision_word(text, x0, x1, second_table_top, second_table_top + 15))
-        for text, x0, x1 in [("Elevated", 100, 170), ("High", 400, 450)]:
-            words.append(_vision_word(text, x0, x1, second_table_top + normal_line_spacing, second_table_top + normal_line_spacing + 15))
+        # 3 أسطر (وليس 2) عمداً كي يبقى هذا الجدول فوق `_SCANNED_TABLE_MIN_ROWS` الحالي
+        # (رُفع لـ3 لاستبعاد أزواج حقول الترويسة الوهمية — انظر توثيق الثابت).
+        for i, (text, x0, x1) in enumerate([("Normal", 100, 160), ("Elevated", 100, 170), ("High", 100, 150)]):
+            words.append(_vision_word(text, x0, x1, second_table_top + i * normal_line_spacing, second_table_top + i * normal_line_spacing + 15))
+        for i, (text, x0, x1) in enumerate([("Range", 400, 460), ("Range", 400, 460), ("Range", 400, 460)]):
+            words.append(_vision_word(text, x0, x1, second_table_top + i * normal_line_spacing, second_table_top + i * normal_line_spacing + 15))
 
         regions = ingest_module._detect_scanned_table_regions(words)
 
         self.assertEqual(len(regions), 2)
         self.assertEqual(regions[0]["rows"][0], ["Region", "BMD", "T-Score", "Z-Score"])
-        self.assertEqual(regions[1]["rows"], [["Normal", "Range"], ["Elevated", "High"]])
+        self.assertEqual(regions[1]["rows"], [["Normal", "Range"], ["Elevated", "Range"], ["High", "Range"]])
 
     def test_plain_prose_page_yields_no_false_positive_table(self):
         words = []
@@ -551,6 +553,38 @@ class TestStructureScannedTableRows(unittest.TestCase):
             dspy.settings.lm = original_lm
 
         self.assertIsNone(result)
+
+
+class TestMergeSplitHeaderRow(unittest.TestCase):
+    """خلل حقيقي وُصِف من المستخدم بعد رفع ملف DEXA حقيقي ("بعض الأرقام تظهر
+    وبعضها لا"): ترويسة مطبوعة على سطرين ("Site Region BMD Young Adult Age
+    Matched" ثم "(gm/cm2) T-score Z-score" تحتهما مباشرة) كانت تُبنى كصفّين
+    منفصلين، فيملأ LLM خلايا Site/Region الناقصة في السطر الثاني بـ"UNCERTAIN" —
+    `_merge_split_header_row` يدمجهما قبل وصولهما لـLLM أصلاً."""
+
+    def test_merges_shorter_second_row_right_aligned_into_first(self):
+        rows = [
+            ["Site", "Region", "BMD", "Young Adult", "Age Matched"],
+            ["( gm / cm2 )", "T - score", "Z - score"],
+            ["Spine", "Total", "0.846", "-2.1", "-1.2"],
+        ]
+
+        merged = ingest_module._merge_split_header_row(rows)
+
+        self.assertEqual(
+            merged,
+            [
+                ["Site", "Region", "BMD ( gm / cm2 )", "Young Adult T - score", "Age Matched Z - score"],
+                ["Spine", "Total", "0.846", "-2.1", "-1.2"],
+            ],
+        )
+
+    def test_leaves_rows_unchanged_when_second_row_is_not_shorter(self):
+        rows = [["Test", "Result"], ["Glucose", "95"], ["Sodium", "140"]]
+        self.assertEqual(ingest_module._merge_split_header_row(rows), rows)
+
+    def test_leaves_single_row_unchanged(self):
+        self.assertEqual(ingest_module._merge_split_header_row([["Only"]]), [["Only"]])
 
 
 class TestScannedTableBlocks(unittest.TestCase):
