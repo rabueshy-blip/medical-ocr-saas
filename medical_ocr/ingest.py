@@ -75,18 +75,29 @@ _VISION_MIN_JPEG_QUALITY = 40
 # DATE/REF) — لكن هذا فعلياً استبعد أيضاً جدولاً سريرياً حقيقياً قصيراً (صفّان فقط:
 # "Overview of measurement result" بقيم Neck/Total الحقيقية)، مُشتِّتاً أرقامه إلى
 # 12 فقرة منفصلة — نفس المشكلة الأصلية بالضبط.** الحل الأدق: الإبقاء على 2، مع
-# فلتر محتوى مستهدف (`_looks_like_label_value_metadata`) يستبعد فقط منطقة من
-# صفّين كل خلاياها تحوي ":" حرفياً (نمط "تسمية: قيمة" الحرفي)، بدل رفض أي جدول
-# قصير بصرف النظر عن محتواه.
+# فلتر محتوى (`_looks_like_non_clinical_metadata`) يستبعد حسب كثافة الخلايا
+# الرقمية بدل حد أدنى عام لعدد الصفوف — انظر توثيقها.
 _SCANNED_TABLE_MIN_ROWS = 2
 _SCANNED_TABLE_MIN_COLS = 2
+# أصغر نسبة خلايا "رقمية صرفة" (بعد إزالة الترقيم الشائع) في منطقة كي تُعتبر
+# جدول بيانات سريري حقيقي — انظر `_looks_like_non_clinical_metadata`.
+_MIN_NUMERIC_CELL_FRACTION = 0.5
+# أكبر تباين نسبي (coefficient of variation) مقبول في عدد خلايا الصفوف داخل منطقة
+# واحدة — انظر `_has_inconsistent_row_lengths`. جداول سريرية حقيقية مُختبَرة فعلياً
+# (Lumbar/Femur) كانت ≈0.1-0.14، بينما نص متناثر حول رسم بياني ≈0.6-0.7.
+_MAX_ROW_LENGTH_VARIATION = 0.3
 # أصغر قفزة نسبية بين فجوتين متتاليتين (مُرتَّبتين، بعد تجاهل ما دون
 # `_SCANNED_TABLE_MIN_GAP_FOR_RATIO_CHECK`) تُعتبر انفصالاً حقيقياً بين "تباعد كلمات
-# عادي" و"فجوة عمود جدول" — انظر `_find_gap_threshold`. 1.9 وليس 2.0: صفحة حقيقية
-# ثالثة من نفس ملف المريض (جدول "Analysis of Lumbar spine") كان الحد الفاصل
-# الحقيقي فيها بين النثر (أقصاه 39px) والفجوات الفعلية (أدناها 77px) بنسبة 1.97 —
-# أقل بقليل من 2.0 فمنع أي انقسام إطلاقاً رغم وجود حد فاصل نظيف وحقيقي.
-_SCANNED_TABLE_MIN_JUMP_RATIO = 1.9
+# عادي" و"فجوة عمود جدول" — انظر `_find_gap_threshold`.
+# **درس مهم (غير متعلق بأي منطق برمجي هنا):** Vision API لا يُرجع نفس bounding
+# boxes بالضبط لنفس صورة الصفحة (نفس bytes بالضبط، تحقّق عبر sha256) عبر استدعاءات
+# منفصلة على فترات زمنية متباعدة (دقائق) رغم استقرارها ضمن دفعة استدعاءات متقاربة
+# (ثوانٍ) — لوحظ فعلياً: نفس صفحة أُعيد اختبارها فشل اكتشاف جدولها (أفضل قفزة
+# 1.725 فقط) بعد أن نجحت سابقاً بنفس اليوم. 1.6 (بدل 1.9) هامش أمان إضافي ضد هذا
+# التذبذب الخارجي الذي لا نملك تحكماً به، وليس نتيجة قياس حاسم لحد فاصل "صحيح"
+# جديد — القيمة الفعلية للحد الفاصل بين نثر/عمود تبقى بحدود مئات البكسل عادةً
+# (هامش كبير)، فخفض العتبة النسبية بمقدار كهذا لا يزيد خطر إيجابيات كاذبة عملياً.
+_SCANNED_TABLE_MIN_JUMP_RATIO = 1.6
 # فجوات أصغر من هذا (بالبكسل) تُستبعَد من فحص القفزة النسبية — عند هذا المقياس
 # الضئيل تهيمن ضجة تقريب bbox (1px مقابل 2px نسبتها 2x رغم كونه فرقاً تافهاً)، لا
 # تباعد حقيقي مقصود.
@@ -733,28 +744,78 @@ def _merge_split_header_row(rows: List[List[str]]) -> List[List[str]]:
     return [merged_first] + rows[2:]
 
 
-def _looks_like_label_value_metadata(rows: List[List[str]]) -> bool:
-    """يتحقق إن كانت منطقة من صفّين فقط أزواج "تسمية: قيمة" (معلومات مريض/ترويسة
-    مثل "NAME : MARZOOKA SLYM" / "FILE NO : 252036") بدل جدول بيانات سريري حقيقي.
+_NUMERIC_CELL_STRIP_CHARS = "()%.,-/: \t"
 
-    **لماذا صفّان فقط تحديداً، وليس أي حد أدنى عام لعدد الصفوف:** جُرِّب أولاً رفع
-    `_SCANNED_TABLE_MIN_ROWS` لاستبعاد هذه الأزواج، لكنه استبعد أيضاً جدولاً سريرياً
-    حقيقياً قصيراً (صفّان: "Overview of measurement result" بقيم Neck/Total
-    الحقيقية) — نفس مشكلة "بعض الأرقام لا تظهر في جدول" بالضبط. الفارق الفعلي
-    ليس عدد الصفوف بل **المحتوى**: صف جدول بيانات حقيقي أول خليته تسمية (Neck)
-    والباقي قيم صرفة، بينما صف معلومات مريض كل خلاياه بذاتها "تسمية: قيمة" (وجود
-    ":" داخل كل خلية على حدة) — فحص أدق يستهدف هذا النمط الحرفي بدل حد أدنى عام."""
-    if len(rows) != 2:
+
+def _is_clean_numeric_cell(cell: str) -> bool:
+    """خلية "رقمية صرفة": بعد إزالة الترقيم الشائع حول الأرقام الطبية (%()."-/:
+    والمسافات)، الباقي أرقام فقط بلا أي حرف. "0.870" أو "-1.5(82%)" رقمية صرفة؛
+    "158.0 cm" أو "98.5 kg" **ليست** كذلك (وحدة القياس حرف ملتصق بالرقم نفسه)."""
+    stripped = "".join(ch for ch in cell if ch not in _NUMERIC_CELL_STRIP_CHARS)
+    return bool(stripped) and stripped.isdigit()
+
+
+def _looks_like_non_clinical_metadata(rows: List[List[str]]) -> bool:
+    """يتحقق إن كانت منطقة معلومات مريض/ترويسة مبعثرة (Name/Birthdate/Weight/
+    Height/Gender/Ethnicity...) بدل جدول بيانات سريري حقيقي (BMD/T-Score/Z-Score) —
+    عبر كثافة الخلايا "الرقمية الصرفة" (`_is_clean_numeric_cell`) في المنطقة كلها،
+    وليس عدد الصفوف.
+
+    **درس من اختبارات حقيقية متتالية على نفس ملف المريض:** أول محاولة استخدمت حداً
+    أدنى لعدد الصفوف (`_SCANNED_TABLE_MIN_ROWS=3`) لاستبعاد أزواج NAME/FILE-NO —
+    استبعدت أيضاً جدولاً سريرياً حقيقياً قصيراً (Overview: Neck/Total). المحاولة
+    الثانية استهدفت حرفياً ":" داخل الخلايا (صفّين فقط) — نجحت مع NAME/FILE-NO لكن
+    فشلت مع شبكة معلومات مريض أعقد (Birthdate/Weight/Gender/Ethnicity، 3×3 خلية)
+    لأن OCR فقد حرف ":" نفسه أثناء التقسيم الهندسي، فلم تبقَ أي خلية تحويه حرفياً.
+
+    **الفارق الفعلي الأعمق:** صف جدول بيانات حقيقي (Neck/L1/Spine...) خليته الأولى
+    تسمية قصيرة والباقي قيم رقمية صرفة (≈75-85% من كل الخلايا رقمية) — بينما صفوف
+    معلومات المريض تخلط تسميات نصية بقيم ذات وحدات ملتصقة حرفياً ("158.0 cm"،
+    "98.5 kg") فتنخفض نسبة الخلايا الرقمية الصرفة كثيراً (~29% في الاختبار الفعلي).
+    هذا المعيار عام (يعمل بصرف النظر عن عدد الصفوف) ويلتقط كلا النمطين معاً.
+
+    **خلل حقيقي اكتُشف واقعياً بعد التطبيق الأول:** جدول BMD الحقيقي (3 صفوف بعد
+    دمج الترويسة: صف ترويسة + Spine + Femur فقط) كان يُستبعَد خطأً — صف الترويسة
+    المدموج نفسه ("Site"، "Region"، "BMD ( gm / cm2 )"...) نصّي بالكامل بطبيعته
+    (كل ترويسة جدول كذلك)، فيُخفِّض متوسط الكثافة الرقمية للجدول القصير كله دون
+    نصف (5 خلايا ترويسة نصية أمام 6 خلايا بيانات رقمية فقط = 40%). **الحل:** تُستبعَد
+    أول صف (الترويسة المُفترَضة) من حساب الكثافة دوماً — لا يُعاقَب جدول قصير
+    لمجرد امتلاكه ترويسة نصية طبيعية كما يجب."""
+    data_rows = rows[1:] if len(rows) > 1 else rows
+    all_cells = [cell for row in data_rows for cell in row if cell]
+    if not all_cells:
         return False
-    all_cells = [cell for row in rows for cell in row]
-    return bool(all_cells) and all(":" in cell for cell in all_cells)
+    numeric_fraction = sum(1 for cell in all_cells if _is_clean_numeric_cell(cell)) / len(all_cells)
+    return numeric_fraction < _MIN_NUMERIC_CELL_FRACTION
+
+
+def _has_inconsistent_row_lengths(rows: List[List[str]]) -> bool:
+    """يتحقق إن كانت أطوال صفوف المنطقة (عدد الخلايا) غير متّسقة نسبياً — إشارة على
+    نص متناثر حول رسم بياني (تسميات محاور رقمية، مفاتيح دلالية مثل
+    Normal/Osteopenia/Osteoporosis) بدل جدول بيانات حقيقي.
+
+    **لماذا هذا معيار منفصل عن كثافة الخلايا الرقمية:** بعض تسميات الرسم البياني
+    (محور الأعمار "20 30 40...100") رقمية بحتة أصلاً، فلا تُستبعَد بفحص الكثافة
+    الرقمية وحده — لكن عدد خلايا أسطرها يتذبذب بشدة (2، 3، 5، 2، 10 في اختبار حقيقي
+    فعلي، تباين نسبي ≈0.6-0.7)، بخلاف جدول بيانات حقيقي (Lumbar/Femur) حيث عدد
+    الخلايا شبه ثابت لكل صف (تباين نسبي ≈0.1-0.14 في نفس الاختبار)."""
+    lengths = [len(row) for row in rows]
+    if len(lengths) < 2:
+        return False
+    mean_length = sum(lengths) / len(lengths)
+    if mean_length == 0:
+        return False
+    variance = sum((length - mean_length) ** 2 for length in lengths) / len(lengths)
+    coefficient_of_variation = (variance**0.5) / mean_length
+    return coefficient_of_variation > _MAX_ROW_LENGTH_VARIATION
 
 
 def _append_table_region(
     regions: List[dict], lines: List[List[dict]], line_cells: List[List[str]], start: int, end: int
 ) -> None:
     """يُضيف منطقة جدول من `lines[start:end]` إن كانت ≥`_SCANNED_TABLE_MIN_ROWS` سطراً
-    وليست أزواج "تسمية: قيمة" (`_looks_like_label_value_metadata`) — مُستخرَجة كدالة
+    وليست معلومات مريض/ترويسة مبعثرة (`_looks_like_non_clinical_metadata`) ولا نصاً
+    متناثراً حول رسم بياني (`_has_inconsistent_row_lengths`) — مُستخرَجة كدالة
     مستقلة لأن `_detect_scanned_table_regions` يحتاج استدعاءها من أكثر من مكان في
     حلقة بناء التسلسلات (كسر التسلسل بسبب سطر غير جدولي، أو بسبب فجوة رأسية كبيرة،
     ونهاية الصفحة)."""
@@ -762,7 +823,7 @@ def _append_table_region(
         return
     region_lines = lines[start:end]
     rows = _merge_split_header_row(line_cells[start:end])
-    if _looks_like_label_value_metadata(rows):
+    if _looks_like_non_clinical_metadata(rows) or _has_inconsistent_row_lengths(rows):
         return
     regions.append(
         {

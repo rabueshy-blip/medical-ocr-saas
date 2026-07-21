@@ -465,18 +465,21 @@ class TestDetectScannedTableRegions(unittest.TestCase):
         words = _dexa_style_words(include_surrounding_paragraph=False)
         normal_line_spacing = 30  # يطابق التباعد بين أسطر الجدول الأول (top=120/150/180)
         second_table_top = 180 + 15 + normal_line_spacing * 6  # فجوة أكبر بكثير من المعتاد
-        # 3 أسطر (وليس 2) عمداً كي يبقى هذا الجدول فوق `_SCANNED_TABLE_MIN_ROWS` الحالي
-        # (رُفع لـ3 لاستبعاد أزواج حقول الترويسة الوهمية — انظر توثيق الثابت).
-        for i, (text, x0, x1) in enumerate([("Normal", 100, 160), ("Elevated", 100, 170), ("High", 100, 150)]):
+        # 3 أسطر تحاكي جدولاً مرجعياً حقيقياً (تسمية + نطاق رقمي) كي يبقى فوق نسبة
+        # الخلايا الرقمية الصرفة الدنيا (`_looks_like_non_clinical_metadata`) —
+        # اختبار قصده الأصلي التباعد الرأسي، وليس فلتر المحتوى.
+        for i, (text, x0, x1) in enumerate([("Test A", 100, 160), ("Test B", 100, 170), ("Test C", 100, 150)]):
             words.append(_vision_word(text, x0, x1, second_table_top + i * normal_line_spacing, second_table_top + i * normal_line_spacing + 15))
-        for i, (text, x0, x1) in enumerate([("Range", 400, 460), ("Range", 400, 460), ("Range", 400, 460)]):
+        for i, (text, x0, x1) in enumerate([("70 - 99", 400, 460), ("3.5 - 5.0", 400, 460), ("0.5 - 1.5", 400, 460)]):
             words.append(_vision_word(text, x0, x1, second_table_top + i * normal_line_spacing, second_table_top + i * normal_line_spacing + 15))
 
         regions = ingest_module._detect_scanned_table_regions(words)
 
         self.assertEqual(len(regions), 2)
         self.assertEqual(regions[0]["rows"][0], ["Region", "BMD", "T-Score", "Z-Score"])
-        self.assertEqual(regions[1]["rows"], [["Normal", "Range"], ["Elevated", "Range"], ["High", "Range"]])
+        self.assertEqual(
+            regions[1]["rows"], [["Test A", "70 - 99"], ["Test B", "3.5 - 5.0"], ["Test C", "0.5 - 1.5"]]
+        )
 
     def test_plain_prose_page_yields_no_false_positive_table(self):
         words = []
@@ -587,26 +590,61 @@ class TestMergeSplitHeaderRow(unittest.TestCase):
         self.assertEqual(ingest_module._merge_split_header_row([["Only"]]), [["Only"]])
 
 
-class TestLooksLikeLabelValueMetadata(unittest.TestCase):
-    """خلل حقيقي: رفع `_SCANNED_TABLE_MIN_ROWS` لاستبعاد أزواج NAME/FILE-NO الوهمية
-    استبعد أيضاً جدولاً سريرياً حقيقياً قصيراً (صفّان فقط) — الفارق الفعلي محتوى
-    الخلايا (كل خلية "تسمية: قيمة" بذاتها) وليس عدد الصفوف."""
+class TestIsCleanNumericCell(unittest.TestCase):
+    def test_plain_number_is_clean(self):
+        self.assertTrue(ingest_module._is_clean_numeric_cell("0.870"))
 
-    def test_two_rows_of_colon_pairs_is_metadata(self):
+    def test_number_with_medical_punctuation_is_clean(self):
+        self.assertTrue(ingest_module._is_clean_numeric_cell("-1.5 ( 82 % )"))
+
+    def test_number_with_inline_unit_letters_is_not_clean(self):
+        # "158.0 cm"/"98.5 kg" (وحدة ملتصقة بالرقم) هي بالضبط الفارق بين خلية
+        # قياس مريض (طول/وزن) وخلية نتيجة مخبرية صرفة (تستخدم % لا حرفاً).
+        self.assertFalse(ingest_module._is_clean_numeric_cell("158.0 cm"))
+        self.assertFalse(ingest_module._is_clean_numeric_cell("98.5 kg"))
+
+    def test_plain_label_is_not_clean(self):
+        self.assertFalse(ingest_module._is_clean_numeric_cell("Neck"))
+
+    def test_empty_cell_is_not_clean(self):
+        self.assertFalse(ingest_module._is_clean_numeric_cell(""))
+        self.assertFalse(ingest_module._is_clean_numeric_cell("()% "))
+
+
+class TestLooksLikeNonClinicalMetadata(unittest.TestCase):
+    """ثلاث محاولات متتالية على نفس ملف مريض حقيقي: (1) حد أدنى لعدد الصفوف —
+    استبعد أيضاً جدولاً سريرياً حقيقياً قصيراً بالخطأ، (2) استهداف ":" حرفياً في
+    صفّين فقط — نجح مع NAME/FILE-NO لكن فشل مع شبكة معلومات مريض أعقد فقد OCR
+    فيها حرف ":" نفسه، (3) **الحل الحالي:** كثافة الخلايا الرقمية الصرفة في
+    المنطقة كلها، بصرف النظر عن عدد الصفوف."""
+
+    def test_name_file_no_pair_is_metadata(self):
         rows = [["NAME : MARZOOKA SLYM", "FILE NO : 252036"], ["DATE : 14/10/2025", "REF : Dr. SHAIMA"]]
-        self.assertTrue(ingest_module._looks_like_label_value_metadata(rows))
+        self.assertTrue(ingest_module._looks_like_non_clinical_metadata(rows))
 
-    def test_two_rows_of_plain_numeric_data_is_not_metadata(self):
+    def test_two_row_clinical_table_is_not_metadata(self):
         rows = [["Neck", "0.698", "-1.9", "-1.2"], ["Total", "0.757", "-1.5", "-1.1"]]
-        self.assertFalse(ingest_module._looks_like_label_value_metadata(rows))
+        self.assertFalse(ingest_module._looks_like_non_clinical_metadata(rows))
 
-    def test_three_row_table_is_never_metadata_regardless_of_content(self):
-        rows = [["A : 1", "B : 2"], ["C : 3", "D : 4"], ["E : 5", "F : 6"]]
-        self.assertFalse(ingest_module._looks_like_label_value_metadata(rows))
+    def test_demographics_grid_without_literal_colons_is_metadata(self):
+        # يحاكي شبكة معلومات مريض حقيقية (Birthdate/Weight/Gender/Ethnicity) حيث
+        # فقد OCR حرف ":" نفسه أثناء التقسيم الهندسي — الفلتر السابق (":" حرفياً)
+        # كان يفشل هنا تحديداً؛ هذا يستخدم بيانات مصطنعة، وليست بيانات المريض الفعلية.
+        rows = [
+            ["Birthdate", "1970-01-01 ( 55.0 )", "Height", "170.0 cm"],
+            ["PATIENT NAME", "Gender", "Male", "Weight", "80.0 kg"],
+            ["Menopause", "No", "Ethnicity", "MIDEAST", "Date Measured 2026-01-01"],
+        ]
+        self.assertTrue(ingest_module._looks_like_non_clinical_metadata(rows))
 
-    def test_mixed_row_with_one_plain_cell_is_not_metadata(self):
-        rows = [["NAME : MARZOOKA SLYM", "252036"], ["DATE : 14/10/2025", "SHAIMA"]]
-        self.assertFalse(ingest_module._looks_like_label_value_metadata(rows))
+    def test_ten_row_clinical_table_is_not_metadata(self):
+        rows = [
+            [f"L{i}", "0.870", "-1.5 ( 82 % )", "-0.6 ( 92 % )", "10.46", "12.03"] for i in range(1, 11)
+        ]
+        self.assertFalse(ingest_module._looks_like_non_clinical_metadata(rows))
+
+    def test_empty_region_is_not_metadata(self):
+        self.assertFalse(ingest_module._looks_like_non_clinical_metadata([]))
 
 
 class TestScannedTableBlocks(unittest.TestCase):
