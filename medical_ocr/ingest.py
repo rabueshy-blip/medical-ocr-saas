@@ -71,13 +71,14 @@ _VISION_MIN_JPEG_QUALITY = 40
 
 # اكتشاف جداول الصفحات الممسوحة هندسياً (`_detect_scanned_table_regions`): أي تسلسل
 # من أسطر متتالية له هذا الحد الأدنى من الأسطر/الخلايا يُعتبر "منطقة جدول" مرشَّحة.
-# 3 وليس 2 عمداً: لوحظ فعلياً على ملف مريض حقيقي أن أزواج حقول الترويسة/التذييل
-# (مثال "NAME: ... FILE NO: ..." يتبعه "DATE: ... REF: ...", أو "Radiologist ...
-# / Dr.AMRO ... هاتف") تُنتِج جداول وهمية بصفّين فقط رغم أنها ليست بيانات سريرية
-# فعلية بل معلومات مريض/ترويسة يجب أن تبقى نصاً عادياً (طلب صريح: لا تُقحَم بيانات
-# المريض/الملاحظات الوصفية في خلايا جدول) — بينما كل جدول سريري حقيقي لوحظ (BMD،
-# معايير WHO) له ≥3 أسطر فعلية، فرفع الحد الأدنى يستبعد الزوجين الوهميين بأمان.
-_SCANNED_TABLE_MIN_ROWS = 3
+# **جُرِّب رفعه إلى 3 لاستبعاد أزواج حقول الترويسة/التذييل الوهمية (NAME/FILE NO،
+# DATE/REF) — لكن هذا فعلياً استبعد أيضاً جدولاً سريرياً حقيقياً قصيراً (صفّان فقط:
+# "Overview of measurement result" بقيم Neck/Total الحقيقية)، مُشتِّتاً أرقامه إلى
+# 12 فقرة منفصلة — نفس المشكلة الأصلية بالضبط.** الحل الأدق: الإبقاء على 2، مع
+# فلتر محتوى مستهدف (`_looks_like_label_value_metadata`) يستبعد فقط منطقة من
+# صفّين كل خلاياها تحوي ":" حرفياً (نمط "تسمية: قيمة" الحرفي)، بدل رفض أي جدول
+# قصير بصرف النظر عن محتواه.
+_SCANNED_TABLE_MIN_ROWS = 2
 _SCANNED_TABLE_MIN_COLS = 2
 # أصغر قفزة نسبية بين فجوتين متتاليتين (مُرتَّبتين، بعد تجاهل ما دون
 # `_SCANNED_TABLE_MIN_GAP_FOR_RATIO_CHECK`) تُعتبر انفصالاً حقيقياً بين "تباعد كلمات
@@ -148,24 +149,37 @@ _MIN_TEXT_TOLERANCE = 1
 
 
 def _cluster_lines(words: list) -> list:
-    """يجمّع كلمات الصفحة (من `extract_words`) في "أسطر" فعلية حسب تراكب مداها الرأسي
-    (top/bottom)، بمعزل عن ترتيب استخراج pdfplumber. كل سطر مُرتَّب أفقياً (x0) لأن حساب
-    فجوات الأعمدة لاحقاً يحتاج كلمات متجاورة على نفس السطر بترتيب القراءة."""
-    lines: list = []
+    """يجمّع كلمات الصفحة (من `extract_words`) في "أسطر" فعلية حسب قرب مركزها
+    الرأسي من متوسط مراكز السطر (وليس تراكب bbox تراكمي)، بمعزل عن ترتيب الاستخراج.
+    كل سطر مُرتَّب أفقياً (x0) لأن حساب فجوات الأعمدة لاحقاً يحتاج كلمات متجاورة
+    على نفس السطر بترتيب القراءة.
+
+    **درس من خلل حقيقي:** النسخة الأولى قارنت تراكب bbox تراكمي (`min(word["bottom"],
+    line_bottom) - max(...) > 0`، حيث `line_bottom` يتوسّع مع كل كلمة تُضاف). هذا
+    يسبب "انزلاقاً تسلسلياً" (transitive drift): جدول DEXA حقيقي بصفوف متقاربة
+    رأسياً جداً (فجوة ~50px، ارتفاع كلمة ~55px) — كلمات الصف الأول تدريجياً تُوسِّع
+    حدود "السطر" حتى تلامس الصف التالي فعلياً، فيلتحم صفّان مختلفان تماماً
+    (Neck وTotal في جدول "Analysis of Femur") في سطر واحد مشوَّش الترتيب. المقارنة
+    بمتوسط المراكز (وليس الحدود القصوى المتراكمة) لا تنجرف بنفس الطريقة لأنها
+    مُقيَّدة بالبيانات الفعلية، وليست دالة أحادية الاتجاه للتوسّع."""
+    lines: List[dict] = []  # كل عنصر: {"centers": [...], "words": [...]}
     for word in sorted(words, key=lambda w: w["top"]):
+        center = (word["top"] + word["bottom"]) / 2
+        height = word["bottom"] - word["top"]
         placed = False
         for line in lines:
-            line_top = min(w["top"] for w in line)
-            line_bottom = max(w["bottom"] for w in line)
-            if min(word["bottom"], line_bottom) - max(word["top"], line_top) > 0:
-                line.append(word)
+            reference = sum(line["centers"]) / len(line["centers"])
+            if abs(center - reference) <= height * 0.6:
+                line["centers"].append(center)
+                line["words"].append(word)
                 placed = True
                 break
         if not placed:
-            lines.append([word])
-    for line in lines:
+            lines.append({"centers": [center], "words": [word]})
+    result = [line["words"] for line in lines]
+    for line in result:
         line.sort(key=lambda w: w["x0"])
-    return lines
+    return result
 
 
 def _min_positive(values: list) -> Optional[float]:
@@ -592,7 +606,12 @@ def _vision_word_boxes(vision_page: dict) -> List[dict]:
     (فقرات فقط). ضروري لاكتشاف بنية جدول هندسياً (صفوف/أعمدة) بنفس فكرة
     `_dynamic_text_table_settings` للصفحات الرقمية (تجميع كلمات حسب الموضع)، لكن هنا
     من كلمات OCR بدل pdfplumber — Vision لا يعطي كياناً اسمه "جدول" أصلاً (انظر توثيق
-    نطاق أعلى الملف)، فقط نص + bbox في كل مستوى (page/block/paragraph/word/symbol)."""
+    نطاق أعلى الملف)، فقط نص + bbox في كل مستوى (page/block/paragraph/word/symbol).
+
+    `slope` (جديد): Vision يعطي رباعياً (quadrilateral) فعلياً دوّاراً لكل كلمة، وليس
+    مربعاً محاذياً للمحاور — نحسب ميل حافته العلوية (أعلى-يسار → أعلى-يمين) ونحتفظ
+    به بدل تجاهله عبر min/max وحدها، لأنه يكشف دوران/ميل الصفحة الفعلي (صفحة
+    مصوَّرة بالهاتف وليست ممسوحة مسطَّحة) — ضروري لـ`_estimate_page_skew_slope`."""
     words: List[dict] = []
     for block in vision_page.get("blocks", []):
         for paragraph in block.get("paragraphs", []):
@@ -601,12 +620,35 @@ def _vision_word_boxes(vision_page: dict) -> List[dict]:
                 if not text.strip():
                     continue
                 vertices = word.get("boundingBox", {}).get("vertices", [])
-                if not vertices:
+                if len(vertices) < 2:
                     continue
                 xs = [v.get("x", 0) for v in vertices]
                 ys = [v.get("y", 0) for v in vertices]
-                words.append({"text": text, "x0": min(xs), "x1": max(xs), "top": min(ys), "bottom": max(ys)})
+                top_left, top_right = vertices[0], vertices[1]
+                dx = top_right.get("x", 0) - top_left.get("x", 0)
+                slope = (top_right.get("y", 0) - top_left.get("y", 0)) / dx if dx else 0.0
+                words.append(
+                    {"text": text, "x0": min(xs), "x1": max(xs), "top": min(ys), "bottom": max(ys), "slope": slope}
+                )
     return words
+
+
+def _estimate_page_skew_slope(words: List[dict]) -> float:
+    """يقدّر ميل انحراف/دوران الصفحة الفعلي (radians تقريباً، tan الزاوية) عبر
+    الوسيط (median، مقاوم للقيم الشاذة) لميل الحافة العلوية لكل كلمة عرضها ≥40px
+    (كلمات أقصر جداً ضجة قياس بحتة لا تعكس دوران الصفحة).
+
+    **درس من اختبار حقيقي:** صفحة مصوَّرة (لا ممسوحة مسطَّحة) بزاوية ميل ~2.5°
+    فعلية جعلت قيمة واحدة ضمن نفس الصف المطبوع (Neck) تنحرف رأسياً ~122px بين
+    أقصى اليسار وأقصى اليمين — أكبر من التباعد الفعلي بين صفوف متجاورة (~53px)،
+    فيكسر `_cluster_lines` (المُقارِن بالموضع الرأسي الخام) تماماً بلا تصحيح: يلتحم
+    جزء من صف بجزء من الصف التالي. يُقيَّد الميل المُقدَّر بـ±0.2 (~±11°) لأن انحرافاً
+    أكبر يعني على الأرجح تخطيطاً حقيقياً متعدد الأعمدة وليس ميل تصوير، فلا يُصحَّح حينها."""
+    slopes = [w["slope"] for w in words if "slope" in w and w["x1"] - w["x0"] >= 40]
+    if not slopes:
+        return 0.0
+    median_slope = statistics.median(slopes)
+    return median_slope if abs(median_slope) <= 0.2 else 0.0
 
 
 def _split_line_into_cells(line: List[dict], gap_threshold: float) -> List[str]:
@@ -688,19 +730,40 @@ def _merge_split_header_row(rows: List[List[str]]) -> List[List[str]]:
     return [merged_first] + rows[2:]
 
 
+def _looks_like_label_value_metadata(rows: List[List[str]]) -> bool:
+    """يتحقق إن كانت منطقة من صفّين فقط أزواج "تسمية: قيمة" (معلومات مريض/ترويسة
+    مثل "NAME : MARZOOKA SLYM" / "FILE NO : 252036") بدل جدول بيانات سريري حقيقي.
+
+    **لماذا صفّان فقط تحديداً، وليس أي حد أدنى عام لعدد الصفوف:** جُرِّب أولاً رفع
+    `_SCANNED_TABLE_MIN_ROWS` لاستبعاد هذه الأزواج، لكنه استبعد أيضاً جدولاً سريرياً
+    حقيقياً قصيراً (صفّان: "Overview of measurement result" بقيم Neck/Total
+    الحقيقية) — نفس مشكلة "بعض الأرقام لا تظهر في جدول" بالضبط. الفارق الفعلي
+    ليس عدد الصفوف بل **المحتوى**: صف جدول بيانات حقيقي أول خليته تسمية (Neck)
+    والباقي قيم صرفة، بينما صف معلومات مريض كل خلاياه بذاتها "تسمية: قيمة" (وجود
+    ":" داخل كل خلية على حدة) — فحص أدق يستهدف هذا النمط الحرفي بدل حد أدنى عام."""
+    if len(rows) != 2:
+        return False
+    all_cells = [cell for row in rows for cell in row]
+    return bool(all_cells) and all(":" in cell for cell in all_cells)
+
+
 def _append_table_region(
     regions: List[dict], lines: List[List[dict]], line_cells: List[List[str]], start: int, end: int
 ) -> None:
-    """يُضيف منطقة جدول من `lines[start:end]` إن كانت ≥`_SCANNED_TABLE_MIN_ROWS` سطراً —
-    مُستخرَجة كدالة مستقلة لأن `_detect_scanned_table_regions` يحتاج استدعاءها من أكثر
-    من مكان في حلقة بناء التسلسلات (كسر التسلسل بسبب سطر غير جدولي، أو بسبب فجوة
-    رأسية كبيرة، ونهاية الصفحة)."""
+    """يُضيف منطقة جدول من `lines[start:end]` إن كانت ≥`_SCANNED_TABLE_MIN_ROWS` سطراً
+    وليست أزواج "تسمية: قيمة" (`_looks_like_label_value_metadata`) — مُستخرَجة كدالة
+    مستقلة لأن `_detect_scanned_table_regions` يحتاج استدعاءها من أكثر من مكان في
+    حلقة بناء التسلسلات (كسر التسلسل بسبب سطر غير جدولي، أو بسبب فجوة رأسية كبيرة،
+    ونهاية الصفحة)."""
     if end - start < _SCANNED_TABLE_MIN_ROWS:
         return
     region_lines = lines[start:end]
+    rows = _merge_split_header_row(line_cells[start:end])
+    if _looks_like_label_value_metadata(rows):
+        return
     regions.append(
         {
-            "rows": _merge_split_header_row(line_cells[start:end]),
+            "rows": rows,
             "bbox": BoundingBox(
                 x0=min(w["x0"] for ln in region_lines for w in ln),
                 y0=min(w["top"] for ln in region_lines for w in ln),
@@ -727,11 +790,30 @@ def _detect_scanned_table_regions(words: List[dict]) -> List[dict]:
     **درس من اختبار حقيقي:** تقرير طبي فيه جدول بيانات رئيسي (BMD/T-Score/Z-Score)
     يتبعه مباشرة (بلا سطر نثر فاصل بينهما) جدول مرجعي مختلف تماماً (معايير WHO
     التشخيصية) بمسافة بيضاء واضحة بينهما فقط — بدون هذا الشرط يلتحم الجدولان في
-    "منطقة" واحدة ضخمة غير صحيحة."""
+    "منطقة" واحدة ضخمة غير صحيحة.
+
+    **تصحيح الميل قبل التجميع (`_estimate_page_skew_slope`):** صفحة مصوَّرة (لا
+    ممسوحة مسطَّحة) قد تكون مائلة بزاوية ثابتة عبر الصفحة كلها — بدون تصحيح، قيم
+    متباعدة أفقياً ضمن نفس الصف المطبوع تنحرف رأسياً أكثر من التباعد الفعلي بين
+    صفوف مختلفة، فيلتحم جزء من صف بجزء من التالي عند التجميع. التصحيح هنا **محلي
+    لقرار التجميع فقط** (نسخ مؤقتة بـtop/bottom مُصحَّحين تُستخدَم لتحديد أي الكلمات
+    تنتمي لنفس السطر)، ثم تُستبدَل فوراً بالكلمات الأصلية غير المُعدَّلة لكل ما
+    يلي (حساب bbox المنطقة، فجوات الأعمدة) كي يبقى الموضع المُبلَّغ مطابقاً للصفحة
+    الفعلية."""
     if not words:
         return []
 
-    lines = [sorted(line, key=lambda w: w["x0"]) for line in _cluster_lines(words)]
+    skew_slope = _estimate_page_skew_slope(words)
+    if skew_slope:
+        clustering_input = [
+            {**w, "top": w["top"] - skew_slope * w["x0"], "bottom": w["bottom"] - skew_slope * w["x0"], "_original": w}
+            for w in words
+        ]
+        lines = [[w["_original"] for w in line] for line in _cluster_lines(clustering_input)]
+    else:
+        lines = _cluster_lines(words)
+
+    lines = [sorted(line, key=lambda w: w["x0"]) for line in lines]
     lines.sort(key=lambda line: min(w["top"] for w in line))
 
     horizontal_gaps = [curr["x0"] - prev["x1"] for line in lines for prev, curr in zip(line, line[1:])]

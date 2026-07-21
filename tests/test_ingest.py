@@ -587,6 +587,28 @@ class TestMergeSplitHeaderRow(unittest.TestCase):
         self.assertEqual(ingest_module._merge_split_header_row([["Only"]]), [["Only"]])
 
 
+class TestLooksLikeLabelValueMetadata(unittest.TestCase):
+    """خلل حقيقي: رفع `_SCANNED_TABLE_MIN_ROWS` لاستبعاد أزواج NAME/FILE-NO الوهمية
+    استبعد أيضاً جدولاً سريرياً حقيقياً قصيراً (صفّان فقط) — الفارق الفعلي محتوى
+    الخلايا (كل خلية "تسمية: قيمة" بذاتها) وليس عدد الصفوف."""
+
+    def test_two_rows_of_colon_pairs_is_metadata(self):
+        rows = [["NAME : MARZOOKA SLYM", "FILE NO : 252036"], ["DATE : 14/10/2025", "REF : Dr. SHAIMA"]]
+        self.assertTrue(ingest_module._looks_like_label_value_metadata(rows))
+
+    def test_two_rows_of_plain_numeric_data_is_not_metadata(self):
+        rows = [["Neck", "0.698", "-1.9", "-1.2"], ["Total", "0.757", "-1.5", "-1.1"]]
+        self.assertFalse(ingest_module._looks_like_label_value_metadata(rows))
+
+    def test_three_row_table_is_never_metadata_regardless_of_content(self):
+        rows = [["A : 1", "B : 2"], ["C : 3", "D : 4"], ["E : 5", "F : 6"]]
+        self.assertFalse(ingest_module._looks_like_label_value_metadata(rows))
+
+    def test_mixed_row_with_one_plain_cell_is_not_metadata(self):
+        rows = [["NAME : MARZOOKA SLYM", "252036"], ["DATE : 14/10/2025", "SHAIMA"]]
+        self.assertFalse(ingest_module._looks_like_label_value_metadata(rows))
+
+
 class TestScannedTableBlocks(unittest.TestCase):
     def test_builds_table_block_with_raw_grid_when_lm_unconfigured(self):
         blocks = ingest_module._scanned_table_blocks(_dexa_style_words(include_surrounding_paragraph=True))
