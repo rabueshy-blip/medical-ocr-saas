@@ -14,12 +14,17 @@ export function ExportButton({ editor }: { editor: Editor | null }) {
     setExportingFormat(format);
     try {
       const baseName = (document?.file_name ?? "translated_document").replace(/\.pdf$/i, "");
-      const blob = await exportFile(format, editor.getJSON(), baseName);
+      const images = format === "docx" ? (document?.images ?? []) : [];
+      const blob = await exportFile(format, editor.getJSON(), baseName, images);
+
+      // مستند Word فيه صور يعود من الخادم كملف ZIP (Word + مجلد images/) بدل .docx
+      // مفرد — الامتداد يُحدَّد من نوع الاستجابة الفعلي، وليس من `format` وحده.
+      const extension = blob.type === "application/zip" ? "zip" : format;
 
       const url = URL.createObjectURL(blob);
       const link = window.document.createElement("a");
       link.href = url;
-      link.download = `${baseName}.${format}`;
+      link.download = `${baseName}.${extension}`;
       link.click();
       URL.revokeObjectURL(url);
     } finally {

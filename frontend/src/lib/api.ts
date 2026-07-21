@@ -34,10 +34,12 @@ export interface Page {
 export interface ImageAsset {
   page_number: number;
   index: number;
+  image_id: string;
   mime_type: string;
   data_base64: string;
   width: number;
   height: number;
+  bbox: BoundingBox | null;
 }
 
 export interface Document {
@@ -64,14 +66,23 @@ export async function extractDocument(file: File): Promise<Document> {
 
 export type ExportFormat = "docx" | "pdf";
 
+export interface ExportImage {
+  image_id: string;
+  mime_type: string;
+  data_base64: string;
+}
+
+/** عند تصدير Word مع وجود صور، يُرجع الخادم ملف ZIP واحد (Word + مجلد images/) بدل
+ * .docx مفرد — انظر `export_docx` في `medical_ocr/api/routers/export.py`. */
 export async function exportFile(
   format: ExportFormat,
   content: unknown,
   fileName: string,
+  images: ExportImage[] = [],
 ): Promise<Blob> {
   const response = await axios.post(
     `${API_BASE_URL}/export-${format}`,
-    { content, file_name: fileName },
+    { content, file_name: fileName, images },
     { responseType: "blob" },
   );
   return response.data;

@@ -119,6 +119,36 @@ class TestExtractDocument(unittest.TestCase):
             self.assertEqual(len(table_blocks), 1)
             self.assertEqual(table_blocks[0].rows, rows)
 
+    def test_embedded_image_is_extracted_as_png_with_placeholder_in_correct_position(self):
+        # ميزة استخراج الأصول: صورة مُضمَّنة بين فقرتين يجب أن (1) تُستخرَج كـImageAsset
+        # مستقل بصيغة PNG، و(2) يظهر Placeholder نصي واضح في مكانها الأصلي بين الفقرتين
+        # في تدفّق المستند (وليس مُلحَقاً في آخر الصفحة).
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pdf_path = os.path.join(tmp_dir, "with_image.pdf")
+            doc = fitz.open()
+            page = doc.new_page()
+            page.insert_text((50, 50), "Before the chart")
+            image = Image.new("RGB", (60, 40), (0, 128, 255))
+            buf = BytesIO()
+            image.save(buf, format="JPEG")
+            page.insert_image(fitz.Rect(50, 100, 150, 180), stream=buf.getvalue())
+            page.insert_text((50, 220), "After the chart")
+            doc.save(pdf_path)
+            doc.close()
+
+            document = extract_document(pdf_path, file_name="with_image.pdf")
+
+            self.assertEqual(len(document.images), 1)
+            asset = document.images[0]
+            self.assertEqual(asset.mime_type, "image/png")
+            self.assertEqual(asset.image_id, "Image_01")
+            self.assertIsNotNone(asset.bbox)
+
+            texts = [b.text for b in document.pages[0].blocks if b.text]
+            self.assertEqual(
+                texts, ["Before the chart", "[Insert Image_01 here]", "After the chart"]
+            )
+
     @patch("medical_ocr.ingest._scanned_page_blocks_vision", return_value=[])
     def test_blank_page_is_routed_to_scanned_ocr_path(self, mock_scanned_blocks):
         # لا نستدعي Google Vision API الحقيقي هنا — فقط نتحقق أن صفحة بلا طبقة نص

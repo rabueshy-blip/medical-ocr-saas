@@ -1,5 +1,7 @@
 """تصدير محتوى المحرر (JSON من TipTap، بعد تحرير المترجم) إلى Word حقيقي أو PDF —
-جداول كجداول حقيقية وليست نصاً مسطَّحاً، صور مُضمَّنة كصور حقيقية.
+جداول كجداول حقيقية وليست نصاً مسطَّحاً. الصور **لا** تُضمَّن كبيانات حقيقية داخل Word
+(انظر `_add_image`) — تُستبدَل بـplaceholder نصي، وتُسلَّم الصورة الفعلية في مجلد
+`images/` ضمن ZIP عند وجود صور (`export_docx`).
 
 يقبل المحتوى المُحرَّر من الواجهة مباشرة (وليس Document الأصلي من extract-document) عمداً:
 الهدف تصدير النتيجة *بعد* ترجمة/تعديل المترجم، لا النص الخام المُستخرَج.
@@ -15,22 +17,34 @@ import html
 import io
 import logging
 import re
+import zipfile
+from typing import List
 
 from docx import Document as DocxDocument
-from docx.shared import Inches
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from playwright.sync_api import sync_playwright
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["export"])
 
 
+class ExportImage(BaseModel):
+    """صورة مُستخرَجة أصلاً عبر `extract-document` (`schema.ImageAsset`)، تُرسَل هنا فقط
+    عند التصدير كي تُحزَم في مجلد `images/` داخل ملف ZIP النهائي — راجع توثيق
+    `export_docx` أدناه لسبب عدم تضمين الصورة الحقيقية داخل Word نفسه."""
+
+    image_id: str
+    mime_type: str = "image/png"
+    data_base64: str
+
+
 class ExportRequest(BaseModel):
     content: dict
     file_name: str = "translated_document"
+    images: List[ExportImage] = Field(default_factory=list)
 
 
 def _safe_file_name(file_name: str) -> str:
@@ -92,13 +106,14 @@ def _add_table(doc: DocxDocument, node: dict) -> None:
 
 
 def _add_image(doc: DocxDocument, node: dict) -> None:
-    src = node.get("attrs", {}).get("src", "")
-    match = re.match(r"^data:(.+?);base64,(.*)$", src)
-    if not match:
-        logger.warning("عنصر صورة بلا data URL صالح، تُخطَّى")
-        return
-    image_bytes = base64.b64decode(match.group(2))
-    doc.add_picture(io.BytesIO(image_bytes), width=Inches(4))
+    """لا تُضمَّن الصورة الحقيقية في ملف Word أبداً (طلب صريح: المترجم يعمل على النص
+    فقط عبر Trados/MateCat، وإدراج الصورة الفعلية مكانها مهمة منفصلة لاحقة لفريق DTP) —
+    بدلاً من ذلك تُكتَب عبارة Placeholder نصية واضحة، بنفس صيغة الـplaceholders التلقائية
+    القادمة أصلاً من `ingest._insert_image_placeholders` (`[Insert Image_XX here]`)، كي
+    يتّسق الشكل بصرف النظر عن كون الصورة أُدرِجَت تلقائياً أو بالسحب اليدوي من مكتبة
+    الوسائط. الصورة الفعلية تُسلَّم بدلاً من ذلك في مجلد `images/` ضمن ملف ZIP التصدير."""
+    image_id = node.get("attrs", {}).get("imageId")
+    doc.add_paragraph(f"[Insert {image_id or 'Image'} here]")
 
 
 @router.post("/export-docx")
@@ -120,15 +135,33 @@ def export_docx(payload: ExportRequest) -> StreamingResponse:
         except Exception as exc:  # عنصر واحد فاشل لا يوقف تصدير بقية المستند
             logger.warning("تعذّر تصدير عنصر من نوع %s: %s", node_type, exc)
 
-    buffer = io.BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
+    docx_buffer = io.BytesIO()
+    doc.save(docx_buffer)
+    docx_buffer.seek(0)
 
     safe_name = _safe_file_name(payload.file_name)
+
+    if not payload.images:
+        return StreamingResponse(
+            docx_buffer,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}.docx"'},
+        )
+
+    # مستند فيه صور: يُسلَّم ZIP واحد (Word + مجلد images/) بدل ملف .docx مفرد، كي يجد
+    # المترجم/فريق DTP الصور التي تشير إليها الـplaceholders النصية داخل Word بسهولة.
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+        zip_file.writestr(f"{safe_name}.docx", docx_buffer.getvalue())
+        for image in payload.images:
+            extension = image.mime_type.rsplit("/", maxsplit=1)[-1] or "png"
+            zip_file.writestr(f"images/{image.image_id}.{extension}", base64.b64decode(image.data_base64))
+    zip_buffer.seek(0)
+
     return StreamingResponse(
-        buffer,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f'attachment; filename="{safe_name}.docx"'},
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}.zip"'},
     )
 
 

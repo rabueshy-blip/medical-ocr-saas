@@ -3,10 +3,10 @@
 import { useEditor, EditorContent, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { TableRow, TableCell, TableHeader } from "@tiptap/extension-table";
-import Image from "@tiptap/extension-image";
 import { useEffect } from "react";
 import {
   LocatableHeading,
+  LocatableImage,
   LocatableParagraph,
   LocatableTable,
 } from "@/lib/tiptapBlockExtensions";
@@ -28,7 +28,7 @@ export function EditorPane({ onEditorReady }: { onEditorReady?: (editor: Editor)
       TableRow,
       TableHeader,
       TableCell,
-      Image,
+      LocatableImage,
     ],
     editorProps: {
       attributes: {
@@ -67,11 +67,16 @@ export function EditorPane({ onEditorReady }: { onEditorReady?: (editor: Editor)
   function handleContainerDrop(event: React.DragEvent<HTMLDivElement>) {
     const src = event.dataTransfer.getData("application/x-medflow-image");
     if (!src || !editor) return;
+    const imageId = event.dataTransfer.getData("application/x-medflow-image-id");
     event.preventDefault();
     const coords = { left: event.clientX, top: event.clientY };
     const pos = editor.view.posAtCoords(coords)?.pos;
     if (pos == null) return;
-    editor.chain().focus().insertContentAt(pos, { type: "image", attrs: { src } }).run();
+    editor
+      .chain()
+      .focus()
+      .insertContentAt(pos, { type: "image", attrs: { src, imageId: imageId || null } })
+      .run();
   }
 
   return (

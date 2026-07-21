@@ -25,14 +25,15 @@ export function MediaLibrary() {
                 <img
                   key={`${image.page_number}-${image.index}`}
                   src={src}
-                  alt={`صورة صفحة ${image.page_number}`}
+                  alt={image.image_id || `صورة صفحة ${image.page_number}`}
                   draggable
                   onDragStart={(event) => {
                     event.dataTransfer.setData("application/x-medflow-image", src);
+                    event.dataTransfer.setData("application/x-medflow-image-id", image.image_id);
                     event.dataTransfer.effectAllowed = "copy";
                   }}
                   className="cursor-grab rounded border border-zinc-200 object-contain dark:border-zinc-700"
-                  title={`صفحة ${image.page_number}`}
+                  title={image.image_id ? `${image.image_id} — صفحة ${image.page_number}` : `صفحة ${image.page_number}`}
                 />
               );
             })}

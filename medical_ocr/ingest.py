@@ -285,10 +285,15 @@ def _table_blocks(pdfplumber_page) -> List[Block]:
 def _page_images(
     fitz_doc: fitz.Document, fitz_page: fitz.Page, page_number: int, seen_xrefs: Set[int]
 ) -> List[ImageAsset]:
-    """يستخرج الصور المُضمَّنة في صفحة رقمية واحدة (شعارات/رسوم بيانية) لمكتبة الوسائط.
+    """يستخرج الصور المُضمَّنة في صفحة رقمية واحدة (شعارات/رسوم بيانية) لمكتبة الوسائط
+    ولإدراج Placeholder تلقائي في مكانها الأصلي (ميزة استخراج الأصول).
 
     `seen_xrefs` يُشارَك عبر المستند كله لتفادي تكرار نفس الصورة (شعار ثابت في كل
-    صفحة مثلاً) مرات عديدة في الحمولة المُرسَلة للواجهة."""
+    صفحة مثلاً) مرات عديدة في الحمولة المُرسَلة للواجهة. تُحوَّل كل صورة إلى PNG (بلا
+    فقدان جودة، بصرف النظر عن الترميز الأصلي JPEG/etc) عبر Pillow — طلب المستخدم صراحةً
+    ملف PNG مستقل بدقة عالية، والدقة الأصلية للصورة المُضمَّنة في PDF هي أعلى دقة متاحة
+    أصلاً (لا رفع دقة اصطناعي ممكن أو مفيد هنا). `image_id` يُترَك فارغاً هنا ويُملأ لاحقاً
+    في `extract_document` (يحتاج عدّاداً عبر المستند كله وليس عبر الصفحة فقط)."""
     images: List[ImageAsset] = []
     for img_index, img in enumerate(fitz_page.get_images(full=True)):
         xref = img[0]
@@ -297,20 +302,59 @@ def _page_images(
         seen_xrefs.add(xref)
         try:
             extracted = fitz_doc.extract_image(xref)
+            png_buffer = BytesIO()
+            Image.open(BytesIO(extracted["image"])).convert("RGB").save(png_buffer, format="PNG")
+            png_bytes = png_buffer.getvalue()
         except Exception as exc:
             logger.warning("تعذّر استخراج الصورة xref=%d من الصفحة %d: %s", xref, page_number, exc)
             continue
+
+        rects = fitz_page.get_image_rects(xref)
+        bbox = None
+        if rects:
+            r = rects[0]
+            bbox = BoundingBox(x0=r.x0, y0=r.y0, x1=r.x1, y1=r.y1)
+
         images.append(
             ImageAsset(
                 page_number=page_number,
                 index=img_index,
-                mime_type=f"image/{extracted['ext']}",
-                data_base64=base64.b64encode(extracted["image"]).decode("ascii"),
+                mime_type="image/png",
+                data_base64=base64.b64encode(png_bytes).decode("ascii"),
                 width=extracted.get("width", 0),
                 height=extracted.get("height", 0),
+                bbox=bbox,
             )
         )
     return images
+
+
+def _insert_image_placeholders(blocks: List[Block], page_images: List[ImageAsset]) -> List[Block]:
+    """يدمج Blocks الصفحة (فقرات/جداول) مع Block نصي Placeholder واحد لكل صورة مكتشفة
+    في نفس الصفحة، ثم يعيد ترتيب الكل حسب الموضع الرأسي الحقيقي (bbox.y0) بدل الاعتماد
+    على ترتيب الاستخراج (كانت الجداول سابقاً تُلحَق دوماً بعد كل الفقرات بصرف النظر عن
+    موضعها الفعلي في الصفحة — هذا الترتيب الجديد ضروري هنا كي يظهر الـplaceholder في
+    موقعه الصحيح بين الفقرات، ويُصحّح كأثر جانبي مفيد ترتيب الجداول أيضاً).
+
+    Blocks بلا bbox (نادرة، مثال بلوك خطأ Vision API) تبقى بترتيبها النسبي الأصلي عبر
+    مفتاح ترتيب مستقر (fallback إلى ما لا نهاية + الفهرس الأصلي)."""
+    placeholders = [
+        Block(
+            block_type=BlockType.PARAGRAPH,
+            text=f"[Insert {image.image_id} here]",
+            bbox=image.bbox,
+            confidence=1.0,
+            source_engine=SourceEngine.PYMUPDF,
+        )
+        for image in page_images
+        if image.bbox is not None
+    ]
+    combined = blocks + placeholders
+    ordered = sorted(
+        enumerate(combined),
+        key=lambda pair: (pair[1].bbox.y0 if pair[1].bbox else float("inf"), pair[0]),
+    )
+    return [block for _, block in ordered]
 
 
 def _scanned_page_blocks_easyocr(page: fitz.Page, dpi: int = 200) -> List[Block]:
@@ -626,7 +670,12 @@ def extract_document(pdf_path: str, file_name: Optional[str] = None) -> Document
                 ]
                 blocks = _digital_page_blocks(fitz_page, exclude_bboxes=table_bboxes) + table_blocks
                 source = PageSource.DIGITAL
-                images.extend(_page_images(fitz_doc, fitz_page, index + 1, seen_image_xrefs))
+
+                page_images = _page_images(fitz_doc, fitz_page, index + 1, seen_image_xrefs)
+                for image in page_images:
+                    images.append(image)
+                    image.image_id = f"Image_{len(images):02d}"
+                blocks = _insert_image_placeholders(blocks, page_images)
             else:
                 source = PageSource.SCANNED
                 try:
