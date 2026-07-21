@@ -111,17 +111,86 @@ def _digital_page_blocks(page: fitz.Page, exclude_bboxes: Optional[List[tuple]] 
     return blocks
 
 
-_TEXT_TABLE_SETTINGS = {
-    "vertical_strategy": "text",
-    "horizontal_strategy": "text",
-    # أكثر تسامحاً من الافتراضي (3px) مع الانحراف الطفيف في محاذاة الأرقام/النصوص داخل
-    # جداول بلا خطوط شبكة مرسومة (شائعة في نتائج المختبرات) — لاحظ أن هذا وحده لا يمنع
-    # صفوفاً فارغة وهمية بين الصفوف الحقيقية (سبب مختلف، متعلق بتوليف الخطوط الوهمية من
-    # مواضع الكلمات، وليس بتفاوت محاذاة الحروف) — لذلك تُرشَّح الصفوف الفارغة بالكامل
-    # لاحقاً في `_table_blocks` كحل عام بدل محاولة ضبط hyper-parameters هشة إضافية.
-    "text_x_tolerance": 5,
-    "text_y_tolerance": 5,
-}
+_DEFAULT_TEXT_TOLERANCE = 5
+_MIN_TEXT_TOLERANCE = 1
+
+
+def _cluster_lines(words: list) -> list:
+    """يجمّع كلمات الصفحة (من `extract_words`) في "أسطر" فعلية حسب تراكب مداها الرأسي
+    (top/bottom)، بمعزل عن ترتيب استخراج pdfplumber. كل سطر مُرتَّب أفقياً (x0) لأن حساب
+    فجوات الأعمدة لاحقاً يحتاج كلمات متجاورة على نفس السطر بترتيب القراءة."""
+    lines: list = []
+    for word in sorted(words, key=lambda w: w["top"]):
+        placed = False
+        for line in lines:
+            line_top = min(w["top"] for w in line)
+            line_bottom = max(w["bottom"] for w in line)
+            if min(word["bottom"], line_bottom) - max(word["top"], line_top) > 0:
+                line.append(word)
+                placed = True
+                break
+        if not placed:
+            lines.append([word])
+    for line in lines:
+        line.sort(key=lambda w: w["x0"])
+    return lines
+
+
+def _min_positive(values: list) -> Optional[float]:
+    positive = [v for v in values if v > 0]
+    return min(positive) if positive else None
+
+
+def _dynamic_text_table_settings(pdfplumber_page) -> dict:
+    """يحسب text_x_tolerance/text_y_tolerance ديناميكياً بدل قيمة ثابتة، بناءً على أضيق
+    فجوة فعلية بين كلمات متجاورة في الصفحة (تجربة تحسينية).
+
+    السبب: `text_x_tolerance` يُمرَّر فعلياً لـ`extract_words` الذي يبنى عليه توليف حدود
+    الأعمدة في استراتيجية `"text"` — تفاوت ثابت (5px) أكبر من الفجوة الحقيقية بين عمودين
+    متقاربين (شائع في نتائج مخبرية مضغوطة، مثال Result/Unit) يجعل pdfplumber يلتحم نص
+    العمودين في "كلمة" واحدة عابرة لحدود الخلية، فيظهر النص في خلية خطأ في Word الناتج.
+    الحل: قياس أضيق فجوة أفقية فعلية بين كلمتين متجاورتين على نفس السطر تقريباً، وإن كانت
+    أصغر من ضِعف التفاوت الافتراضي نخفّض `text_x_tolerance` إلى نصف تلك الفجوة (بحد أدنى
+    1px) بدل الإبقاء على قيمة ثابتة قد تبتلعها. نفس المنطق رأسياً بين الأسطر (`text_y_tolerance`)
+    لمنع التحام نص سطرين متقاربين رأسياً في خلية واحدة.
+
+    ملاحظة مهمة: هذا لا علاقة له بمشكلة الصفوف الفارغة الوهمية الموثّقة سابقاً (تلك ناتجة عن
+    توليف خطوط وهمية من مواضع الكلمات نفسها، ولا يحلّها ضبط التفاوت — لذلك تبقى مُعالَجة عبر
+    فلترة الصفوف الفارغة في `_table_blocks`)؛ هذا تحسين لمشكلة مختلفة: التحام نص عمودين
+    متجاورين ضمن نفس الصف."""
+    words = pdfplumber_page.extract_words(x_tolerance=1, y_tolerance=1, keep_blank_chars=False)
+    x_tol, y_tol = _DEFAULT_TEXT_TOLERANCE, _DEFAULT_TEXT_TOLERANCE
+    if not words:
+        return {
+            "vertical_strategy": "text",
+            "horizontal_strategy": "text",
+            "text_x_tolerance": x_tol,
+            "text_y_tolerance": y_tol,
+        }
+
+    lines = _cluster_lines(words)
+
+    min_h_gap = _min_positive(
+        b["x0"] - a["x1"] for line in lines for a, b in zip(line, line[1:])
+    )
+    if min_h_gap is not None and min_h_gap < _DEFAULT_TEXT_TOLERANCE * 2:
+        x_tol = max(_MIN_TEXT_TOLERANCE, min_h_gap / 2)
+
+    line_bboxes = sorted(
+        ((min(w["top"] for w in line), max(w["bottom"] for w in line)) for line in lines)
+    )
+    min_v_gap = _min_positive(
+        b_top - a_bottom for (_, a_bottom), (b_top, _) in zip(line_bboxes, line_bboxes[1:])
+    )
+    if min_v_gap is not None and min_v_gap < _DEFAULT_TEXT_TOLERANCE * 2:
+        y_tol = max(_MIN_TEXT_TOLERANCE, min_v_gap / 2)
+
+    return {
+        "vertical_strategy": "text",
+        "horizontal_strategy": "text",
+        "text_x_tolerance": x_tol,
+        "text_y_tolerance": y_tol,
+    }
 
 
 def _find_tables(pdfplumber_page):
@@ -129,11 +198,13 @@ def _find_tables(pdfplumber_page):
     الأدق حين تكون موجودة)، ثم يلجأ لاستراتيجية `"text"` (محاذاة نصية بلا خطوط) فقط إن
     لم يكتشف الإعداد الافتراضي أي جدول — كثير من جداول النتائج المخبرية الطبية ليس لها
     خطوط شبكة مرسومة أصلاً. تطبيق `"text"` مباشرة على جدول له خطوط فعلية يُفسِد النتيجة
-    (يُنتج صفوفاً فارغة وهمية من المسافة حول الخطوط)، لذا الترتيب هنا مقصود وليس تبسيطاً."""
+    (يُنتج صفوفاً فارغة وهمية من المسافة حول الخطوط)، لذا الترتيب هنا مقصود وليس تبسيطاً.
+    عند اللجوء لاستراتيجية `"text"`، التفاوت (`text_x/y_tolerance`) يُحسَب ديناميكياً لكل
+    صفحة عبر `_dynamic_text_table_settings` بدل قيمة ثابتة."""
     tables = pdfplumber_page.find_tables()
     if tables:
         return tables
-    return pdfplumber_page.find_tables(table_settings=_TEXT_TABLE_SETTINGS)
+    return pdfplumber_page.find_tables(table_settings=_dynamic_text_table_settings(pdfplumber_page))
 
 
 def _extract_table_rows(table) -> tuple[List[List[str]], List[List[int]]]:

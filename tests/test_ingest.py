@@ -53,6 +53,21 @@ def _make_table_pdf(path: str, rows) -> None:
     doc.close()
 
 
+def _make_tight_borderless_table_pdf(path: str, rows, col_x) -> None:
+    """يبني PDF بجدول بلا خطوط شبكة (نص مُحاذى بالمواضع فقط، كنتائج مخبرية شائعة) مع
+    أعمدة متقاربة جداً عمداً — يستخدم لاختبار أن التفاوت الديناميكي
+    (`_dynamic_text_table_settings`) يمنع التحام نص عمودين متجاورين في خلية واحدة."""
+    doc = fitz.open()
+    page = doc.new_page()
+    row_h = 25
+    for r, row in enumerate(rows):
+        y = 50 + r * row_h
+        for c, cell in enumerate(row):
+            page.insert_text((col_x[c], y), cell, fontsize=10)
+    doc.save(path)
+    doc.close()
+
+
 class TestExtractDocument(unittest.TestCase):
     def test_digital_page_uses_pymupdf_text_without_ocr(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -82,6 +97,27 @@ class TestExtractDocument(unittest.TestCase):
             self.assertEqual(len(table_blocks), 1)
             self.assertEqual(table_blocks[0].rows, rows)
             self.assertEqual(table_blocks[0].source_engine, SourceEngine.PDFPLUMBER)
+
+    def test_borderless_table_with_tight_columns_does_not_bleed_into_neighbor_cell(self):
+        # عمود "Result" ("95"، "4.2") وعمود "Unit" ("mg/dL"، "mmol/L") متباعدان عمداً
+        # ~3px فقط (أقل بكثير من التفاوت الثابت القديم 5px) — قبل التفاوت الديناميكي كان
+        # هذا يُنتج "ResultUnit"/"95 mg/dL" ملتحمَين في خلية واحدة (تحقّقنا من هذا فعلياً
+        # عبر تشغيل الإعداد الثابت القديم مباشرة قبل كتابة هذا الاختبار).
+        rows = [
+            ["Test", "Result", "Unit", "Range"],
+            ["Glucose", "95", "mg/dL", "70-99"],
+            ["Potassium", "4.2", "mmol/L", "3.5-5.0"],
+        ]
+        col_x = [50, 150, 181, 260]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pdf_path = os.path.join(tmp_dir, "tight.pdf")
+            _make_tight_borderless_table_pdf(pdf_path, rows, col_x)
+
+            document = extract_document(pdf_path, file_name="tight.pdf")
+
+            table_blocks = [b for b in document.pages[0].blocks if b.block_type == BlockType.TABLE]
+            self.assertEqual(len(table_blocks), 1)
+            self.assertEqual(table_blocks[0].rows, rows)
 
     @patch("medical_ocr.ingest._scanned_page_blocks_vision", return_value=[])
     def test_blank_page_is_routed_to_scanned_ocr_path(self, mock_scanned_blocks):
