@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 import dspy
 import fitz
 import requests
-from PIL import Image
+from PIL import Image, ImageDraw
 
 import medical_ocr.ingest as ingest_module
 from medical_ocr.ingest import (
@@ -647,9 +647,108 @@ class TestLooksLikeNonClinicalMetadata(unittest.TestCase):
         self.assertFalse(ingest_module._looks_like_non_clinical_metadata([]))
 
 
+def _draw_ruled_grid_png(row_ys, col_xs, size=(900, 700), line_width=3) -> bytes:
+    """يبني صورة PNG بجدول خطوط شبكة مرسومة فعلياً (وليس مجرد نص متباعد) — لاختبار
+    `_detect_ruled_table_regions` دون الحاجة لملف مريض حقيقي. الشبكة تبقى بعيدة عمداً
+    عن حواف الصورة المطلقة (هامش ≥10% من كل جهة) كي لا تُستبعَد خطأً بصفتها ظل/حافة
+    صفحة مصوَّرة (انظر `_RULED_TABLE_EDGE_ARTIFACT_MARGIN_RATIO`)."""
+    img = Image.new("L", size, 255)
+    draw = ImageDraw.Draw(img)
+    for y in row_ys:
+        draw.line([(col_xs[0], y), (col_xs[-1], y)], fill=0, width=line_width)
+    for x in col_xs:
+        draw.line([(x, row_ys[0]), (x, row_ys[-1])], fill=0, width=line_width)
+    buffer = BytesIO()
+    img.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _strip_empty_border_cells(rows: list) -> list:
+    """يُزيل صفوفاً/أعمدة فارغة تماماً من الحواف — dilate الدمج (merge_kernel) يوسِّع
+    صندوق المنطقة المكتشَفة قليلاً عمداً، فيُضيف صفاً/عموداً فارغاً على كل حافة."""
+    rows = [row for row in rows if any(cell for cell in row)]
+    if not rows:
+        return rows
+    empty_cols = [i for i in range(len(rows[0])) if not any(row[i] for row in rows)]
+    return [[cell for i, cell in enumerate(row) if i not in empty_cols] for row in rows]
+
+
+class TestDetectRuledTableRegions(unittest.TestCase):
+    """اكتشاف جداول بخطوط شبكة مرسومة فعلياً (استمارات/معلومات مريض حدودها مرسومة)
+    عبر معالجة صورة — خلاف صريح عن الاكتشاف الهندسي من تباعد النص بلا حدود. طُلب
+    صراحة من المستخدم بعد اختبار ملف أشعة/إحالة حقيقي فيه جداول نموذجية بخطوط
+    مرسومة لمعلومات مريض (Patient ID/Name/DOB) بلا أي محتوى رقمي — يجب أن تُكتشَف
+    كجداول دوماً بصرف النظر عن المحتوى."""
+
+    def _words(self, *rows_of_cells):
+        words = []
+        for row_idx, cells in enumerate(rows_of_cells):
+            top, bottom = 130 + row_idx * 150, 160 + row_idx * 150
+            for col_idx, text in enumerate(cells):
+                x0 = 150 + col_idx * 300
+                words.append({"text": text, "x0": x0, "x1": x0 + 100, "top": top, "bottom": bottom, "slope": 0.0})
+        return words
+
+    def test_finds_grid_and_assigns_words_to_correct_cells(self):
+        image_bytes = _draw_ruled_grid_png(row_ys=[100, 250, 400, 550], col_xs=[100, 400, 700])
+        words = self._words(["Header1", "Header2"], ["Value1", "Value2"], ["Value3", "Value4"])
+
+        regions = ingest_module._detect_ruled_table_regions(image_bytes, words)
+
+        self.assertEqual(len(regions), 1)
+        rows = _strip_empty_border_cells(regions[0]["rows"])
+        self.assertEqual(rows, [["Header1", "Header2"], ["Value1", "Value2"], ["Value3", "Value4"]])
+
+    def test_plain_image_with_no_lines_yields_no_regions(self):
+        img = Image.new("L", (900, 700), 255)
+        buffer = BytesIO()
+        img.save(buffer, format="PNG")
+        regions = ingest_module._detect_ruled_table_regions(buffer.getvalue(), self._words(["Header1", "Header2"]))
+        self.assertEqual(regions, [])
+
+    def test_invalid_image_bytes_return_no_regions_without_crashing(self):
+        self.assertEqual(ingest_module._detect_ruled_table_regions(b"not-an-image", []), [])
+
+    def test_table_with_non_numeric_patient_metadata_is_still_detected(self):
+        # طلب صريح من المستخدم: خطوط مرسومة فعلياً = جدول دوماً، حتى بلا أي أرقام —
+        # خلافاً لـ`_looks_like_non_clinical_metadata` التي لا تُطبَّق هنا إطلاقاً.
+        image_bytes = _draw_ruled_grid_png(row_ys=[100, 250, 400], col_xs=[100, 400, 700])
+        words = self._words(["Patient Name", "Gender"], ["Bndr Al Jehani", "Male"])
+
+        regions = ingest_module._detect_ruled_table_regions(image_bytes, words)
+
+        self.assertEqual(len(regions), 1)
+        rows = _strip_empty_border_cells(regions[0]["rows"])
+        self.assertEqual(rows, [["Patient Name", "Gender"], ["Bndr Al Jehani", "Male"]])
+
+
+class TestDropOverlappingBoxes(unittest.TestCase):
+    """خلل حقيقي: دمج صندوقين متداخلين (جدول حقيقي + شعار/ختم مُزخرَف ملتصق بحافته)
+    في اتحادهما كان يُخفِّض كثافة الخطوط الرأسية دون عتبة الكشف، فيفشل استخراج حدود
+    الأعمدة كلياً رغم وجود جدول حقيقي واضح — الإبقاء على الأكثف وإسقاط الآخر يحلّ هذا."""
+
+    def test_keeps_denser_box_when_overlapping(self):
+        sparse_logo_like = ((0, 0, 200, 200), 0.02)
+        dense_real_table = ((50, 50, 300, 300), 0.05)
+
+        kept = ingest_module._drop_overlapping_boxes([sparse_logo_like, dense_real_table])
+
+        self.assertEqual(kept, [(50, 50, 300, 300)])
+
+    def test_non_overlapping_boxes_are_both_kept(self):
+        box_a = ((0, 0, 100, 100), 0.05)
+        box_b = ((200, 200, 300, 300), 0.05)
+
+        kept = ingest_module._drop_overlapping_boxes([box_a, box_b])
+
+        self.assertEqual(set(kept), {(0, 0, 100, 100), (200, 200, 300, 300)})
+
+
 class TestScannedTableBlocks(unittest.TestCase):
     def test_builds_table_block_with_raw_grid_when_lm_unconfigured(self):
-        blocks = ingest_module._scanned_table_blocks(_dexa_style_words(include_surrounding_paragraph=True))
+        # bytes فارغة عمداً: تُفشِل `_ruled_line_masks` بأمان (تُعيد None، فتُتخطى
+        # منطقة الخطوط المرسومة) وتترك المسار الهندسي النصي وحده قيد الاختبار هنا.
+        blocks = ingest_module._scanned_table_blocks(b"", _dexa_style_words(include_surrounding_paragraph=True))
 
         self.assertEqual(len(blocks), 1)
         block = blocks[0]

@@ -36,8 +36,10 @@ from functools import lru_cache
 from io import BytesIO
 from typing import List, Optional, Set
 
+import cv2
 import dspy
 import fitz  # PyMuPDF
+import numpy as np
 import pdfplumber
 import requests
 from PIL import Image
@@ -86,6 +88,32 @@ _MIN_NUMERIC_CELL_FRACTION = 0.5
 # واحدة — انظر `_has_inconsistent_row_lengths`. جداول سريرية حقيقية مُختبَرة فعلياً
 # (Lumbar/Femur) كانت ≈0.1-0.14، بينما نص متناثر حول رسم بياني ≈0.6-0.7.
 _MAX_ROW_LENGTH_VARIATION = 0.3
+
+# اكتشاف جداول بخطوط شبكة مرسومة فعلياً (`_detect_ruled_table_regions`) — استمارات/
+# جداول معلومات مريض حدودها مرسومة، خلافاً لجداول القياس بلا حدود المُكتشَفة هندسياً
+# من تباعد النص فقط. قرار مستخدم صريح: أي جدول بخطوط مرسومة فعلياً يُعتبر جدولاً
+# دوماً بصرف النظر عن محتواه (لا يخضع لفلاتر `_looks_like_non_clinical_metadata`/
+# `_has_inconsistent_row_lengths` المخصَّصة للاكتشاف الهندسي من النص فقط).
+_RULED_TABLE_MIN_LINE_PIXELS = 800
+# قطاعات خط رأسي/أفقي أطول من هذه النسبة من ارتفاع/عرض الصفحة تُستبعَد بصفتها ظل/
+# حافة صفحة مصوَّرة (لوحظ فعلياً: خطان رأسيان بطول الصفحة كاملاً من حافتَي الصورة
+# المصوَّرة، وليسا جزءاً من أي جدول) — جدول حقيقي نادراً ما يمتد طوله/عرضه لهذه الدرجة.
+_RULED_TABLE_MAX_VERTICAL_SPAN_RATIO = 0.5
+_RULED_TABLE_MAX_HORIZONTAL_SPAN_RATIO = 0.85
+# هامش حواف الصورة يُستبعَد كلياً قبل اكتشاف الخطوط (نفس سبب أعلاه: ظل/انحناء تصوير
+# شائع عند حواف الصفحة المصوَّرة، جدول حقيقي لا يلامس حافة الصفحة المطلقة عملياً).
+_RULED_TABLE_EDGE_MARGIN_RATIO = 0.02
+# قطاع خط طويل جداً (يتجاوز نسبة الامتداد أعلاه) يُستبعَد فقط إن كان **أيضاً** قريباً
+# من حافة الصورة المطلقة ضمن هذه النسبة — طول وحده لا يكفي (جدول حقيقي طويل، مثال
+# استمارة فيها خلية شكوى مريض ضخمة، قد يشغل معظم ارتفاع الصفحة أيضاً لكنه لا يلامس
+# الحافة المطلقة عملياً، يبقى هامش أبيض حوله دوماً).
+_RULED_TABLE_EDGE_ARTIFACT_MARGIN_RATIO = 0.15
+# أصغر نسبة تغطية (طول الخط ÷ امتداد المحور الكلي) تُعتبر خط شبكة حقيقياً داخل منطقة
+# جدول — 0.15 وليس أعلى: جدول حقيقي (استمارة إحالة) فيه خلية واحدة ضخمة مدمجة (شكوى
+# المريض، نص سريري طويل) يجعل الخط الرأسي الفاصل الحقيقي بين عمودي "تسمية/قيمة" لا
+# يغطي إلا ~26% من الارتفاع الكلي للمنطقة (يقتصر على الصفوف القصيرة أعلى/أسفل الخلية
+# الضخمة) — عتبة أعلى (كانت 0.3 مبدئياً) تفوّت هذا الخط الحقيقي تماماً.
+_RULED_TABLE_LINE_COVERAGE_RATIO = 0.15
 # أصغر قفزة نسبية بين فجوتين متتاليتين (مُرتَّبتين، بعد تجاهل ما دون
 # `_SCANNED_TABLE_MIN_GAP_FOR_RATIO_CHECK`) تُعتبر انفصالاً حقيقياً بين "تباعد كلمات
 # عادي" و"فجوة عمود جدول" — انظر `_find_gap_threshold`.
@@ -961,14 +989,217 @@ def _structure_scanned_table_rows(raw_rows: List[List[str]]) -> Optional[List[Li
     return [[str(row.get(col, "")) for col in columns] for row in structured]
 
 
-def _scanned_table_blocks(words: List[dict]) -> List[Block]:
-    """يبني Block(TABLE) واحداً لكل منطقة جدول مُكتشَفة هندسياً في صفحة ممسوحة، بعد
-    محاولة تصحيحها عبر LM (`_structure_scanned_table_rows`). `raw_rows` تبقى دوماً
-    الشبكة الخام قبل أي تصحيح (أثر تدقيق/audit trail، نفس مبدأ باقي المشروع) بصرف
-    النظر عن نجاح التصحيح — `confidence`/`source_engine` يعكسان أيّهما استُخدم فعلياً
-    في `rows`."""
+def _drop_oversized_line_components(mask: "np.ndarray", max_span_ratio: float, axis: str) -> "np.ndarray":
+    """يستبعد قطاعات خط (مكوّنات متصلة) أطول/أعرض من `max_span_ratio` من ارتفاع/عرض
+    الصفحة كلها **و** قريبة من حافة الصورة المطلقة — ظل أو حافة صفحة مصوَّرة (وليست
+    ممسوحة مسطَّحة) تُنتج خطوطاً طويلة جداً ملتصقة بحافة الصورة، بخلاف حدود جدول حقيقي
+    طويل (قد يشغل معظم ارتفاع الصفحة أيضاً، لوحظ في استمارة حقيقية بخلية شكوى مريض
+    ضخمة) لكنه لا يلامس الحافة المطلقة عملياً — يبقى هامش أبيض حوله دوماً.
+
+    **درس من اختبار حقيقي:** الشرطان معاً ضروريان؛ الطول وحده كان يستبعد خطوطاً
+    رأسية حقيقية لجدول طويل (تجربة اصطناعية بجدول يشغل 64% من ارتفاع صورة اختبار)،
+    والقرب من الحافة وحده كان سيُبقي ظلال تصوير قصيرة نسبياً. `axis="v"` يقيس
+    الارتفاع/الموضع الأفقي (لخطوط رأسية)، `axis="h"` يقيس العرض/الموضع الرأسي
+    (لخطوط أفقية)."""
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    mask_height, mask_width = mask.shape
+    span_dim, span_stat = (mask_height, cv2.CC_STAT_HEIGHT) if axis == "v" else (mask_width, cv2.CC_STAT_WIDTH)
+    edge_dim, pos_stat, size_stat = (
+        (mask_width, cv2.CC_STAT_LEFT, cv2.CC_STAT_WIDTH)
+        if axis == "v"
+        else (mask_height, cv2.CC_STAT_TOP, cv2.CC_STAT_HEIGHT)
+    )
+    span_limit = span_dim * max_span_ratio
+    edge_margin = edge_dim * _RULED_TABLE_EDGE_ARTIFACT_MARGIN_RATIO
+
+    cleaned = np.zeros_like(mask)
+    for i in range(1, count):
+        is_too_long = stats[i, span_stat] > span_limit
+        pos_start = stats[i, pos_stat]
+        pos_end = pos_start + stats[i, size_stat]
+        is_near_edge = pos_start <= edge_margin or pos_end >= edge_dim - edge_margin
+        if not (is_too_long and is_near_edge):
+            cleaned[labels == i] = 255
+    return cleaned
+
+
+def _ruled_line_masks(image_bytes: bytes) -> Optional[tuple]:
+    """يستخرج قناعَي الخطوط الأفقية/الرأسية المرسومة فعلياً في صورة صفحة ممسوحة عبر
+    عمليات مورفولوجية (erode بعنصر بنيوي واسع أفقياً/رأسياً يعزل الخطوط الطويلة فقط،
+    ثم dilate لاستعادة سمكها) — يكتشف استمارات/جداول معلومات حدودها مرسومة فعلياً،
+    خلافاً لجداول القياس بلا حدود (`_detect_scanned_table_regions` الهندسي من النص).
+
+    هامش حواف الصورة يُصفَّر أولاً، وقطاعات الخط الطويلة جداً (ظل/انحناء تصوير عند
+    حواف الصفحة، وليست جزءاً من أي جدول — لوحظ فعلياً: خطان رأسيان بطول الصفحة كاملاً
+    من حافتَي صورة مصوَّرة بالهاتف) تُستبعَد عبر `_drop_oversized_line_components`.
+    يُعيد None إن تعذّر فك ترميز الصورة (تدهور آمن، لا يوقف الاستخراج)."""
+    try:
+        gray = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_GRAYSCALE)
+    except Exception:
+        return None
+    if gray is None:
+        return None
+
+    height, width = gray.shape
+    binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 15, 10)
+
+    margin = int(min(height, width) * _RULED_TABLE_EDGE_MARGIN_RATIO)
+    if margin > 0:
+        binary[:margin, :] = 0
+        binary[-margin:, :] = 0
+        binary[:, :margin] = 0
+        binary[:, -margin:] = 0
+
+    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(width // 30, 1), 1))
+    h_lines = cv2.dilate(cv2.erode(binary, h_kernel, iterations=1), h_kernel, iterations=2)
+    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(height // 30, 1)))
+    v_lines = cv2.dilate(cv2.erode(binary, v_kernel, iterations=1), v_kernel, iterations=2)
+
+    h_lines = _drop_oversized_line_components(h_lines, _RULED_TABLE_MAX_HORIZONTAL_SPAN_RATIO, axis="h")
+    v_lines = _drop_oversized_line_components(v_lines, _RULED_TABLE_MAX_VERTICAL_SPAN_RATIO, axis="v")
+    return h_lines, v_lines
+
+
+def _drop_overlapping_boxes(candidates: List[tuple]) -> List[tuple]:
+    """عند تداخل صندوقين مرشَّحين، يُبقي الأكثر كثافة خطوط شبكة حقيقية (بكسل خط لكل
+    وحدة مساحة) ويُسقط الآخر بالكامل.
+
+    **درس من خلل حقيقي:** جُرِّب أولاً *دمج* الصندوقين المتداخلين في اتحادهما (شعار/
+    ختم مُزخرَف دائري التصق بحافة جدول حقيقي مجاور، منحنياته سُجِّلت خطأً كقطاع خط) —
+    لكن الاتحاد الأكبر خفَّض كثافة الخطوط الرأسية داخله دون عتبة الكشف (لأن مساحة
+    الشعار الفارغة انضمّت لحساب الكثافة)، ففشل استخراج حدود الأعمدة كلياً رغم وجود
+    جدول حقيقي واضح تماماً ضمن نفس المنطقة. إسقاط الصندوق الأضعف كثافة (الشعار) بدل
+    دمجه يحلّ هذا تماماً لأن الجدول الحقيقي يبقى بحدوده الأصلية الدقيقة.
+
+    `candidates`: قائمة (bbox, density) — density = مجموع بكسلات الخط / مساحة الصندوق."""
+    ordered = sorted(candidates, key=lambda item: item[1], reverse=True)
+    kept: List[tuple] = []
+    for (x0, y0, x1, y1), _density in ordered:
+        overlaps_kept = any(x0 < kx1 and kx0 < x1 and y0 < ky1 and ky0 < y1 for kx0, ky0, kx1, ky1 in kept)
+        if not overlaps_kept:
+            kept.append((x0, y0, x1, y1))
+    return kept
+
+
+def _line_group_centers(mask_roi: "np.ndarray", axis: int, extent: int, origin: int) -> List[int]:
+    """يجد مراكز مجموعات البكسل المضاءة (خطوط شبكة) عبر محور واحد ضمن منطقة جدول —
+    `axis=1` يجمع كل صف (خطوط أفقية، حدود صفوف)، `axis=0` يجمع كل عمود (خطوط رأسية،
+    حدود أعمدة). خطوط متجاورة (سماكة الخط نفسه عدة بكسل) تُجمَّع في مجموعة واحدة.
+
+    `origin`: يُضاف لكل موضع مُكتشَف لتحويله من إحداثي نسبي داخل `mask_roi` (المقطوعة
+    من الصورة الكاملة) إلى إحداثي مطلق على الصفحة — **خلل حقيقي وُجد ويُصحَّح هنا:**
+    نسخة أولى أعادت المواضع النسبية مباشرة دون هذا التعويض، فاختلطت بحدود مطلقة
+    (`y0`/`y1` أو `x0`/`x1`) في نفس قائمة الحدود، منتجة شبكة صفوف/أعمدة عشوائية
+    تماماً لا تطابق الجدول الحقيقي إطلاقاً."""
+    sums = mask_roi.sum(axis=axis)
+    threshold = 255 * extent * _RULED_TABLE_LINE_COVERAGE_RATIO
+    positions = [i for i, s in enumerate(sums) if s > threshold]
+    groups: List[List[int]] = []
+    for pos in positions:
+        if groups and pos - groups[-1][-1] <= 5:
+            groups[-1].append(pos)
+        else:
+            groups.append([pos])
+    return [origin + int(sum(g) / len(g)) for g in groups]
+
+
+def _assign_words_to_grid(words: List[dict], row_bounds: List[int], col_bounds: List[int]) -> List[List[str]]:
+    """يعيّن كل كلمة (مركزها) لخليتها في شبكة الجدول (بين حدّي صف وحدّي عمود متتاليين)
+    مباشرة من الهندسة المرسومة الفعلية — أدق من التقسيم عند فجوات النص (يستخدمه
+    الاكتشاف الهندسي بلا حدود) لأنه يعتمد على خطوط حقيقية مرسومة، لا تقديراً."""
+    n_rows, n_cols = len(row_bounds) - 1, len(col_bounds) - 1
+    grid = [["" for _ in range(n_cols)] for _ in range(n_rows)]
+    for word in words:
+        center_x = (word["x0"] + word["x1"]) / 2
+        center_y = (word["top"] + word["bottom"]) / 2
+        row_idx = next((i for i in range(n_rows) if row_bounds[i] <= center_y < row_bounds[i + 1]), None)
+        col_idx = next((i for i in range(n_cols) if col_bounds[i] <= center_x < col_bounds[i + 1]), None)
+        if row_idx is None or col_idx is None:
+            continue
+        cell = grid[row_idx][col_idx]
+        grid[row_idx][col_idx] = f"{cell} {word['text']}".strip() if cell else word["text"]
+    return grid
+
+
+def _detect_ruled_table_regions(image_bytes: bytes, words: List[dict]) -> List[dict]:
+    """يكتشف جداول بخطوط شبكة مرسومة فعلياً (استمارات/جداول معلومات مريض حدودها
+    مرسومة على الصفحة الممسوحة نفسها — مثال: حقول Patient ID/Name/DOB في استمارة
+    أشعة/تحويل) عبر معالجة صورة (OpenCV)، خلافاً لـ`_detect_scanned_table_regions`
+    الذي يكتشف جداول القياس بلا حدود هندسياً من تباعد النص فقط.
+
+    **قرار مستخدم صريح:** أي جدول بخطوط مرسومة فعلياً يُعتبر جدولاً دوماً بصرف النظر
+    عن محتواه — لا يخضع لفلاتر `_looks_like_non_clinical_metadata`/
+    `_has_inconsistent_row_lengths` (تلك مخصَّصة للاكتشاف الهندسي من النص بلا حدود،
+    حيث لا يوجد دليل بصري مباشر على وجود جدول أصلاً). خطوط الشبكة الحقيقية إشارة
+    أقوى وأوثق من أي تحليل محتوى."""
+    masks = _ruled_line_masks(image_bytes)
+    if masks is None:
+        return []
+    h_lines, v_lines = masks
+
+    grid_mask = cv2.bitwise_or(h_lines, v_lines)
+    merge_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+    merged_mask = cv2.dilate(grid_mask, merge_kernel, iterations=2)
+    contours, _ = cv2.findContours(merged_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    candidates = []
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        h_count = cv2.countNonZero(h_lines[y : y + h, x : x + w])
+        v_count = cv2.countNonZero(v_lines[y : y + h, x : x + w])
+        if h_count >= _RULED_TABLE_MIN_LINE_PIXELS and v_count >= _RULED_TABLE_MIN_LINE_PIXELS:
+            density = (h_count + v_count) / (w * h)
+            candidates.append(((x, y, x + w, y + h), density))
+
+    regions = []
+    for x0, y0, x1, y1 in _drop_overlapping_boxes(candidates):
+        row_bounds = [y0] + _line_group_centers(h_lines[y0:y1, x0:x1], axis=1, extent=x1 - x0, origin=y0) + [y1]
+        col_bounds = [x0] + _line_group_centers(v_lines[y0:y1, x0:x1], axis=0, extent=y1 - y0, origin=x0) + [x1]
+        if len(row_bounds) < 3 or len(col_bounds) < 3:
+            continue  # أقل من صفّين/عمودين فعليّين بين الحدود — ليس شبكة جدول حقيقية
+
+        region_words = [w for w in words if x0 <= (w["x0"] + w["x1"]) / 2 <= x1 and y0 <= (w["top"] + w["bottom"]) / 2 <= y1]
+        rows = _assign_words_to_grid(region_words, row_bounds, col_bounds)
+        if not any(cell for row in rows for cell in row):
+            continue
+        regions.append({"rows": rows, "bbox": BoundingBox(x0=x0, y0=y0, x1=x1, y1=y1)})
+
+    return regions
+
+
+def _scanned_table_blocks(image_bytes: bytes, words: List[dict]) -> List[Block]:
+    """يبني Block(TABLE) لكل منطقة جدول مُكتشَفة، من مصدرين مستقلَّين:
+
+    1. جداول بخطوط شبكة مرسومة فعلياً (`_detect_ruled_table_regions`) — تُعتبر
+       جدولاً دوماً بصرف النظر عن محتواها (لا فلاتر محتوى)، ولا تُصحَّح عبر LM
+       (بنيتها معروفة بدقة من الخطوط الحقيقية نفسها).
+    2. جداول بلا حدود مُكتشَفة هندسياً من تباعد النص (`_detect_scanned_table_regions`)
+       على الكلمات المتبقية فقط (خارج مناطق الجداول المرسومة، لتفادي ازدواج) — بعد
+       محاولة تصحيحها عبر LM (`_structure_scanned_table_rows`).
+
+    `raw_rows` تبقى دوماً الشبكة الخام قبل أي تصحيح (أثر تدقيق/audit trail)."""
     blocks: List[Block] = []
-    for region in _detect_scanned_table_regions(words):
+
+    ruled_regions = _detect_ruled_table_regions(image_bytes, words)
+    ruled_bboxes = []
+    for region in ruled_regions:
+        bbox = region["bbox"]
+        ruled_bboxes.append((bbox.x0, bbox.y0, bbox.x1, bbox.y1))
+        blocks.append(
+            Block(
+                block_type=BlockType.TABLE,
+                rows=region["rows"],
+                raw_rows=region["rows"],
+                bbox=bbox,
+                confidence=0.7,
+                source_engine=SourceEngine.GOOGLE_VISION,
+            )
+        )
+
+    remaining_words = [
+        w for w in words if not _bbox_center_in_any((w["x0"], w["top"], w["x1"], w["bottom"]), ruled_bboxes)
+    ]
+    for region in _detect_scanned_table_regions(remaining_words):
         raw_rows = region["rows"]
         structured_rows = _structure_scanned_table_rows(raw_rows)
         if structured_rows is not None:
@@ -1050,11 +1281,11 @@ def _scanned_page_blocks_vision(page: fitz.Page, dpi: int = 200) -> List[Block]:
     Vision API (DOCUMENT_TEXT_DETECTION).
 
     اكتشاف الجداول (جديد): يُستخرَج bbox كل كلمة (`_vision_word_boxes`) وتُكتشَف مناطق
-    شبيهة بجداول هندسياً (`_detect_scanned_table_regions`) — Vision نفسه لا يعطي كيان
-    جدول جاهزاً. كل منطقة مُكتشَفة تصير Block(TABLE) واحداً (بعد محاولة تصحيح عبر LM
-    تلقائياً، انظر `_structure_scanned_table_rows`)، والفقرات التي تقع داخل حدودها
-    تُستبعَد من الفقرات العادية لتفادي تكرار النص، ثم يُعاد ترتيب الجميع بالموضع
-    الحقيقي (`_sort_blocks_by_position`) بدل إلحاق الجداول دوماً في النهاية."""
+    شبيهة بجداول من مصدرين (`_scanned_table_blocks`): خطوط شبكة مرسومة فعلياً (أولوية،
+    عبر معالجة صورة)، ثم تباعد نصي هندسي بلا حدود على الباقي — Vision نفسه لا يعطي
+    كيان جدول جاهزاً. كل منطقة مُكتشَفة تصير Block(TABLE) واحداً، والفقرات التي تقع
+    داخل حدودها تُستبعَد من الفقرات العادية لتفادي تكرار النص، ثم يُعاد ترتيب الجميع
+    بالموضع الحقيقي (`_sort_blocks_by_position`) بدل إلحاق الجداول دوماً في النهاية."""
     pixmap = page.get_pixmap(dpi=dpi)
     image_bytes = _compress_image_to_limit(pixmap.tobytes("png"))
 
@@ -1065,7 +1296,7 @@ def _scanned_page_blocks_vision(page: fitz.Page, dpi: int = 200) -> List[Block]:
 
     blocks: List[Block] = []
     for vision_page in full_text_annotation["pages"]:
-        table_blocks = _scanned_table_blocks(_vision_word_boxes(vision_page))
+        table_blocks = _scanned_table_blocks(image_bytes, _vision_word_boxes(vision_page))
         table_bboxes = [(b.bbox.x0, b.bbox.y0, b.bbox.x1, b.bbox.y1) for b in table_blocks if b.bbox]
         paragraph_blocks = _blocks_from_vision_page(vision_page, exclude_bboxes=table_bboxes)
         blocks.extend(_sort_blocks_by_position(paragraph_blocks + table_blocks))
