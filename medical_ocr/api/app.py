@@ -38,9 +38,13 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Medical OCR — Reasoning Pipeline API", version="0.1.0", lifespan=lifespan)
 
 # للتطوير المحلي فقط: يسمح لواجهة Next.js (منفذ 3000 افتراضياً) بمناداة الـAPI عبر المتصفح.
+# كلا الاسمين مُدرَجان عمداً (وليس "localhost" فقط): بعض المتصفحات (Safari تحديداً،
+# لوحظ فعلياً) تتعثّر مع "localhost" بسبب IPv6/HSTS مخزَّن سابقاً، فيُستخدَم
+# "127.0.0.1" بدلاً منه — لكن هذا يغيّر الـOrigin الفعلي الذي يرسله المتصفح، فيُرفَض
+# من CORS إن لم يكن مُدرَجاً هنا أيضاً.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_methods=["*"],
     allow_headers=["*"],
 )

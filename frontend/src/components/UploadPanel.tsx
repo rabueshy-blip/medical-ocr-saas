@@ -40,7 +40,12 @@ export function UploadPanel() {
         ref={inputRef}
         type="file"
         accept="application/pdf"
-        className="hidden"
+        // "hidden" (display:none) بدل هذا كان يمنع Safari من فتح نافذة اختيار
+        // الملف فعلياً عند استدعاء .click() برمجياً (خلل WebKit معروف: عناصر
+        // display:none لا تستجيب لـ.click() المُستدعى من كود، رغم عملها في
+        // Chrome/Firefox) — sr-only تُبقي العنصر في الشجرة بصرياً (opacity:0 +
+        // موضع مطلق) بدل إخفائه بالكامل، فيعمل في كل المتصفحات.
+        className="sr-only"
         onChange={(e) => {
           const file = e.target.files?.[0];
           if (file) handleFileSelected(file);
