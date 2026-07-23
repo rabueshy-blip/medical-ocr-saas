@@ -1,0 +1,11 @@
+.venv
+frontend/node_modules
+frontend/.next
+tests
+data
+scripts
+streamlit_app.py
+requirements.txt
+.git
+.env
+*.log

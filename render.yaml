@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: medflow-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GOOGLE_VISION_API_KEY
+        sync: false
+      - key: CORS_EXTRA_ORIGINS
+        sync: false

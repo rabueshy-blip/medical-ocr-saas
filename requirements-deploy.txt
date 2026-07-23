@@ -1,0 +1,22 @@
+# نسخة مُصغَّرة من requirements.txt لنشر خادم FastAPI فقط (Render).
+# تستبعد عمداً: easyocr/torch/torchvision (محرك ثانٍ غير مستخدَم في المسار الفعلي —
+# Vision API هو المحرك الافتراضي، انظر medical_ocr/ingest.py) وstreamlit (تطبيق منفصل
+# غير مطلوب هنا). استبعادهما يوفّر ~1.8GB من حجم صورة Docker، ضروري لتشغيل الخدمة
+# ضمن حدود ذاكرة الطبقة المجانية على Render.
+
+pymupdf
+pdfplumber
+requests
+rapidfuzz
+dspy-ai
+python-dotenv
+fastapi
+uvicorn[standard]
+python-multipart
+opencv-python-headless
+numpy
+pandas
+Pillow
+openpyxl
+python-docx
+playwright
