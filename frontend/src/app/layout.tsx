@@ -14,7 +14,6 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Medflow.ai",
-  description: "محرر الترجمة الطبية — عرض PDF جنباً إلى جنب مع محرر نصوص وجداول تفاعلي",
 };
 
 export default function RootLayout({
