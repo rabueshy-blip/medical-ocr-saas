@@ -12,6 +12,7 @@ MedicalTableStructurer) بنقاط HTTP، تمهيداً لربط الـ pipelin
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -37,14 +38,22 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Medical OCR — Reasoning Pipeline API", version="0.1.0", lifespan=lifespan)
 
-# للتطوير المحلي فقط: يسمح لواجهة Next.js (منفذ 3000 افتراضياً) بمناداة الـAPI عبر المتصفح.
+# للتطوير المحلي: يسمح لواجهة Next.js (منفذ 3000 افتراضياً) بمناداة الـAPI عبر المتصفح.
 # كلا الاسمين مُدرَجان عمداً (وليس "localhost" فقط): بعض المتصفحات (Safari تحديداً،
 # لوحظ فعلياً) تتعثّر مع "localhost" بسبب IPv6/HSTS مخزَّن سابقاً، فيُستخدَم
 # "127.0.0.1" بدلاً منه — لكن هذا يغيّر الـOrigin الفعلي الذي يرسله المتصفح، فيُرفَض
 # من CORS إن لم يكن مُدرَجاً هنا أيضاً.
+# CORS_EXTRA_ORIGINS (اختياري، مفصول بفواصل) يضيف نطاقات إنتاج حقيقية (مثال:
+# https://medflow.ai) دون تعديل الكود عند كل نشر.
+_extra_origins = [
+    origin.strip()
+    for origin in os.environ.get("CORS_EXTRA_ORIGINS", "").split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", *_extra_origins],
     allow_methods=["*"],
     allow_headers=["*"],
 )
