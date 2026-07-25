@@ -558,6 +558,54 @@ class TestStructureScannedTableRows(unittest.TestCase):
         self.assertIsNone(result)
 
 
+def _char(c: str, x0: float, x1: float, y0: float = 100.0, y1: float = 112.0) -> dict:
+    return {"c": c, "bbox": (x0, y0, x1, y1)}
+
+
+class TestVisibleLineText(unittest.TestCase):
+    """خلل حقيقي مُشخَّص عبر PDF تقرير طبي حقيقي (نظام HIS لمستشفى سعودي): النص
+    العربي الظاهر يحمل بين حروفه نسخة "شبح" مكرَّرة بترتيب معكوس، كل حرف منها بعرض
+    صفري (x0==x1) — على الأرجح أثر توافقية من مولّد التقرير. `_visible_line_text`
+    تستبعد أي حرف بعرض صفري فتُبقي النص المرئي الحقيقي فقط."""
+
+    def test_strips_interleaved_zero_width_reversed_duplicate(self):
+        # يحاكي حرفياً ما وُجد فعلياً في الملف الحقيقي: "تاريخ" مقسومة بحرفَي "تاري"
+        # و"خ" حول نسخة معكوسة بعرض صفري من "المراجعة" ("ةعجارملا")، تتبعها النسخة
+        # الحقيقية الظاهرة لاحقاً في نفس السطر — القيم x مأخوذة من نفس نمط الملف
+        # الحقيقي (تناقص من اليمين لليسار، RTL).
+        real = [("ت", 298.3, 301.3), ("ا", 295.8, 298.4), ("ر", 291.0, 295.8), ("ي", 288.0, 291.0)]
+        phantom = [("ة", 288.1), ("ع", 288.1), ("ج", 288.1), ("ا", 288.1),
+                   ("ر", 288.1), ("م", 288.1), ("ل", 288.1), ("ا", 288.1), (" ", 288.1)]
+        rest = [("خ", 281.9, 288.1), (" ", 279.1, 281.9), ("ا", 276.7, 279.1),
+                ("ل", 274.2, 276.8), ("م", 269.7, 274.2), ("ر", 264.9, 269.6),
+                ("ا", 262.6, 265.0), ("ج", 256.8, 262.5), ("ع", 252.8, 256.8), ("ة", 248.3, 252.9)]
+
+        chars = (
+            [_char(c, x0, x1) for c, x0, x1 in real]
+            + [_char(c, x, x) for c, x in phantom]
+            + [_char(c, x0, x1) for c, x0, x1 in rest]
+        )
+        line = {"spans": [{"chars": chars}]}
+
+        self.assertEqual(ingest_module._visible_line_text(line), "تاريخ المراجعة")
+
+    def test_leaves_line_without_zero_width_chars_unchanged(self):
+        chars = [_char(c, i * 10, i * 10 + 8) for i, c in enumerate("hello")]
+        line = {"spans": [{"chars": chars}]}
+
+        self.assertEqual(ingest_module._visible_line_text(line), "hello")
+
+    def test_joins_multiple_spans_in_line_order(self):
+        line = {
+            "spans": [
+                {"chars": [_char("a", 0, 8), _char("b", 8, 16)]},
+                {"chars": [_char("c", 16, 24)]},
+            ]
+        }
+
+        self.assertEqual(ingest_module._visible_line_text(line), "abc")
+
+
 class TestMergeSplitHeaderRow(unittest.TestCase):
     """خلل حقيقي وُصِف من المستخدم بعد رفع ملف DEXA حقيقي ("بعض الأرقام تظهر
     وبعضها لا"): ترويسة مطبوعة على سطرين ("Site Region BMD Young Adult Age

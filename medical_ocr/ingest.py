@@ -165,13 +165,37 @@ def _bbox_center_in_any(bbox: tuple, containers: List[tuple]) -> bool:
     return False
 
 
+# خلل حقيقي مُشخَّص على تقرير طبي عربي حقيقي (نظام HIS لمستشفى سعودي، وليس افتراضاً
+# نظرياً): بعض الكلمات العربية تحمل في نفس الوقت نسخة ظاهرة (bbox حقيقي بعرض>0) ونسخة
+# "شبح" مكرَّرة بترتيب معكوس مدمجة في نفس الـspan، كل حرف منها بعرض صفري تماماً
+# (x0==x1 في bbox الحرف) — على الأرجح أثر جانبي من مولّد التقرير (نسخة بحث/نسخ قديمة
+# الترتيب لم تُصحَّح، لا تزال في تدفّق النص رغم إخفائها بصرياً عبر عرض صفري). `page.get_text
+# ("blocks")` يُرجع كل الحروف دون تمييز، فيظهر النص مقلوباً ومنفصلاً. تحقّق فعلي:
+# استبعاد الحروف بعرض صفري حوّل "وزارعاـفدلا ة الدفـاع" إلى "وزارة الدفـاع" الصحيحة.
+# **قيد معروف:** هذا لا يميّز حركات تشكيل عربية حقيقية (قد تُرسَم بعرض صفري تصميمياً)
+# عن هذا الخلل — لم تظهر أي حركات تشكيل في أي ملف حقيقي اختُبر به حتى الآن.
+_ZERO_WIDTH_CHAR_EPSILON = 0.05
+
+
+def _visible_line_text(line: dict) -> str:
+    return "".join(
+        char["c"]
+        for span in line["spans"]
+        for char in span["chars"]
+        if abs(char["bbox"][2] - char["bbox"][0]) >= _ZERO_WIDTH_CHAR_EPSILON
+    )
+
+
 def _digital_page_blocks(page: fitz.Page, exclude_bboxes: Optional[List[tuple]] = None) -> List[Block]:
     exclude_bboxes = exclude_bboxes or []
     blocks = []
-    for x0, y0, x1, y1, text, *_rest in page.get_text("blocks"):
-        text = text.strip()
+    for raw_block in page.get_text("rawdict")["blocks"]:
+        if raw_block.get("type") != 0:  # 0 = نص، 1 = صورة — الصور تُستخرَج منفصلة عبر _page_images
+            continue
+        text = "\n".join(_visible_line_text(line) for line in raw_block["lines"]).strip()
         if not text:
             continue
+        x0, y0, x1, y1 = raw_block["bbox"]
         if _bbox_center_in_any((x0, y0, x1, y1), exclude_bboxes):
             continue
         blocks.append(
