@@ -1,8 +1,16 @@
 "use client";
 
-import { useRef } from "react";
+import { useRef, useSyncExternalStore } from "react";
 import { extractDocument } from "@/lib/api";
 import { useDocumentStore } from "@/store/useDocumentStore";
+import { WHATSAPP_NUMBER } from "@/components/WhatsAppButton";
+import {
+  addPagesUsed,
+  FREE_PAGE_LIMIT,
+  getPagesUsed,
+  getServerPagesUsed,
+  subscribePagesUsed,
+} from "@/lib/usageLimit";
 
 export function UploadPanel() {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -13,17 +21,48 @@ export function UploadPanel() {
   const setStatus = useDocumentStore((state) => state.setStatus);
   const setError = useDocumentStore((state) => state.setError);
 
+  // getServerSnapshot (0) يُستخدَم فقط أثناء SSR/الرسم الأول (الخادم لا يملك
+  // localStorage) — بعد hydration في المتصفح يُقرأ الرصيد الحقيقي مباشرة، ويعاد
+  // تقييمه تلقائياً كلما استدعت addPagesUsed حدث التغيير.
+  const pagesUsed = useSyncExternalStore(
+    subscribePagesUsed,
+    getPagesUsed,
+    getServerPagesUsed,
+  );
+  const limitReached = pagesUsed >= FREE_PAGE_LIMIT;
+
   async function handleFileSelected(file: File) {
+    if (getPagesUsed() >= FREE_PAGE_LIMIT) return;
     setFile(file);
     setStatus("uploading");
     try {
       const document = await extractDocument(file);
       setDocument(document);
+      addPagesUsed(document.pages.length);
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "تعذّر استخراج المستند";
       setError(message);
     }
+  }
+
+  if (limitReached) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">
+        <p className="max-w-md text-zinc-700 dark:text-zinc-300">
+          لقد وصلت إلى الحد الأقصى للخطة المجانية (30 صفحة). للاستمرار في استخدام
+          الخدمة، تواصل معنا عبر واتساب للاشتراك.
+        </p>
+        <a
+          href={`https://wa.me/${WHATSAPP_NUMBER}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="rounded-lg bg-[#25D366] px-6 py-3 text-white hover:opacity-90"
+        >
+          تواصل معنا للاشتراك
+        </a>
+      </div>
+    );
   }
 
   return (
