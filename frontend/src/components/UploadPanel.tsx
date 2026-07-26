@@ -1,14 +1,16 @@
 "use client";
 
-import { useRef, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { extractDocument } from "@/lib/api";
 import { useDocumentStore } from "@/store/useDocumentStore";
 import { WHATSAPP_NUMBER } from "@/components/WhatsAppButton";
 import {
   addPagesUsed,
+  applyUnlockCodeFromUrl,
   FREE_PAGE_LIMIT,
   getPagesUsed,
   getServerPagesUsed,
+  isUnlimited,
   subscribePagesUsed,
 } from "@/lib/usageLimit";
 
@@ -29,10 +31,19 @@ export function UploadPanel() {
     getPagesUsed,
     getServerPagesUsed,
   );
-  const limitReached = pagesUsed >= FREE_PAGE_LIMIT;
+
+  // رابط سري (?unlock=...) يُطبَّق مرة واحدة عند التحميل ويُخزَّن دائماً في هذا
+  // المتصفح — استثناء يدوي لعملاء محدَّدين بلا نظام حسابات في الموقع.
+  const [unlimited, setUnlimited] = useState(false);
+  useEffect(() => {
+    applyUnlockCodeFromUrl();
+    setUnlimited(isUnlimited());
+  }, []);
+
+  const limitReached = !unlimited && pagesUsed >= FREE_PAGE_LIMIT;
 
   async function handleFileSelected(file: File) {
-    if (getPagesUsed() >= FREE_PAGE_LIMIT) return;
+    if (!isUnlimited() && getPagesUsed() >= FREE_PAGE_LIMIT) return;
     setFile(file);
     setStatus("uploading");
     try {

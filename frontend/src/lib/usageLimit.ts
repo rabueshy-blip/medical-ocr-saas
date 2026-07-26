@@ -1,5 +1,7 @@
 const STORAGE_KEY = "medflow_pages_used";
 const CHANGE_EVENT = "medflow-pages-used-changed";
+const UNLIMITED_KEY = "medflow_unlimited";
+const UNLOCK_CODE = "f835811c4361361504358ed5";
 
 /** حد الخطة المجانية: مجموع تراكمي لعدد صفحات كل الملفات التي رفعها نفس الزائر عبر
  * كل الجلسات (مُتتبَّع في localStorage للمتصفح — لا يوجد نظام حسابات/تسجيل دخول في
@@ -35,4 +37,28 @@ export function subscribePagesUsed(callback: () => void): () => void {
 
 export function getServerPagesUsed(): number {
   return 0;
+}
+
+/** لعملاء محدَّدين يُمنَح استثناء دائم من حد الصفحات المجانية عبر رابط سري
+ * (`?unlock=...`) — لا يوجد نظام حسابات في الموقع، فهذا أبسط استثناء ممكن
+ * دون تعديل الخادم. */
+export function isUnlimited(): boolean {
+  if (typeof window === "undefined") return false;
+  return window.localStorage.getItem(UNLIMITED_KEY) === "true";
+}
+
+export function applyUnlockCodeFromUrl(): void {
+  if (typeof window === "undefined") return;
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get("unlock");
+  if (!code || code !== UNLOCK_CODE) return;
+
+  window.localStorage.setItem(UNLIMITED_KEY, "true");
+  params.delete("unlock");
+  const query = params.toString();
+  window.history.replaceState(
+    {},
+    "",
+    window.location.pathname + (query ? `?${query}` : "") + window.location.hash,
+  );
 }
