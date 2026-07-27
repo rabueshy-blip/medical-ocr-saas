@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r requirements-deploy.txt \
     && playwright install --with-deps chromium
 
 COPY medical_ocr ./medical_ocr
+COPY data ./data
 
 ENV PORT=8000
 EXPOSE 8000
