@@ -16,10 +16,11 @@ import logging
 import os
 import tempfile
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 
 from ...ingest import extract_document
 from ...schema import Document
+from ..rate_limit import limiter
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,8 @@ router = APIRouter(tags=["documents"])
 
 
 @router.post("/extract-document", response_model=Document)
-async def extract_document_endpoint(file: UploadFile = File(...)) -> Document:
+@limiter.limit("20/minute")
+async def extract_document_endpoint(request: Request, file: UploadFile = File(...)) -> Document:
     if not (file.filename or "").lower().endswith(".pdf"):
         raise HTTPException(status_code=422, detail="الملف المرفوع يجب أن يكون بصيغة PDF")
 

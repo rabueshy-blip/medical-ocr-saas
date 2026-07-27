@@ -15,10 +15,15 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from ..lm_config import configure_lm
+from .auth import require_api_key
+from .rate_limit import limiter
 from .routers import documents, export, spelling, tables
 from .schemas import HealthResponse
 
@@ -58,10 +63,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(spelling.router)
-app.include_router(tables.router)
-app.include_router(documents.router)
-app.include_router(export.router)
+# تحديد معدّل الطلبات (slowapi): يعتمد على IP العميل، الحدود الفعلية مضبوطة لكل نقطة
+# داخل المُوجِّهات نفسها (انظر rate_limit.py وتوثيق كل نقطة).
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
+
+# مصادقة مفتاح API: مطلوبة على كل النقاط المكلفة (LM/استخراج/تصدير)، وليس /health —
+# انظر auth.py لتفاصيل السلوك عند غياب APP_API_KEY.
+_auth_dep = [Depends(require_api_key)]
+app.include_router(spelling.router, dependencies=_auth_dep)
+app.include_router(tables.router, dependencies=_auth_dep)
+app.include_router(documents.router, dependencies=_auth_dep)
+app.include_router(export.router, dependencies=_auth_dep)
 
 
 @app.get("/health", response_model=HealthResponse)

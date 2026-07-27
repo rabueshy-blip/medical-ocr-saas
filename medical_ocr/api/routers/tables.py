@@ -5,12 +5,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from ..dependencies import get_table_structurer
 from ..schemas import TableStructuringRequest, TableStructuringResponse
 from ..lm_guard import require_lm_configured
+from ..rate_limit import limiter
 from ...signatures.tables import MedicalTableStructurer
 
 router = APIRouter(tags=["tables"])
 
 
 @router.post("/structure-table", response_model=TableStructuringResponse)
+@limiter.limit("30/minute")
 def structure_table(
     payload: TableStructuringRequest,
     request: Request,

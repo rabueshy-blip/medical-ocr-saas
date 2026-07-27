@@ -21,10 +21,12 @@ import zipfile
 from typing import List
 
 from docx import Document as DocxDocument
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from playwright.sync_api import sync_playwright
 from pydantic import BaseModel, Field
+
+from ..rate_limit import limiter
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +124,8 @@ def _add_image(doc: DocxDocument, node: dict) -> None:
 
 
 @router.post("/export-docx")
-def export_docx(payload: ExportRequest) -> StreamingResponse:
+@limiter.limit("20/minute")
+def export_docx(request: Request, payload: ExportRequest) -> StreamingResponse:
     top_content = payload.content.get("content", [])
     if not top_content:
         raise HTTPException(status_code=422, detail="المستند فارغ، لا يوجد محتوى للتصدير")
@@ -220,7 +223,8 @@ def _content_to_html_document(content: dict) -> str:
 
 
 @router.post("/export-pdf")
-def export_pdf(payload: ExportRequest) -> StreamingResponse:
+@limiter.limit("10/minute")
+def export_pdf(request: Request, payload: ExportRequest) -> StreamingResponse:
     top_content = payload.content.get("content", [])
     if not top_content:
         raise HTTPException(status_code=422, detail="المستند فارغ، لا يوجد محتوى للتصدير")

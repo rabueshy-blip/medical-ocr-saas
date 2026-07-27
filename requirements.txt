@@ -30,6 +30,10 @@ fastapi
 uvicorn[standard]
 python-multipart
 
+# --- تحديد معدّل الطلبات (rate limiting) لمنع استنزاف حصة Gemini/Vision المجانية
+# واستهلاك موارد الخادم من طلبات مجهولة/آلية ---
+slowapi
+
 # --- اعتماديات مساعدة ---
 opencv-python-headless
 numpy

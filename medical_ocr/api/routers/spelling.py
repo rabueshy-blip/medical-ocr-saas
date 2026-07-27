@@ -5,12 +5,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from ..dependencies import get_spelling_corrector
 from ..schemas import SpellingCorrectionRequest, SpellingCorrectionResponse
 from ..lm_guard import require_lm_configured
+from ..rate_limit import limiter
 from ...signatures.spelling import MedicalSpellingCorrector
 
 router = APIRouter(tags=["spelling"])
 
 
 @router.post("/correct-spelling", response_model=SpellingCorrectionResponse)
+@limiter.limit("30/minute")
 def correct_spelling(
     payload: SpellingCorrectionRequest,
     request: Request,
