@@ -114,6 +114,19 @@ _RULED_TABLE_EDGE_ARTIFACT_MARGIN_RATIO = 0.15
 # يغطي إلا ~26% من الارتفاع الكلي للمنطقة (يقتصر على الصفوف القصيرة أعلى/أسفل الخلية
 # الضخمة) — عتبة أعلى (كانت 0.3 مبدئياً) تفوّت هذا الخط الحقيقي تماماً.
 _RULED_TABLE_LINE_COVERAGE_RATIO = 0.15
+# خلل حقيقي مُشخَّص على استمارة إحالة عربية/إنجليزية حقيقية (2026-07-29، ملف مريض
+# فعلي وليس اصطناعياً): الاستمارة فيها بالفعل خطوط شبكة مرسومة حقيقية، لكن حقل
+# "شكوى المريض" (Patient Complaint) يحوي فقرة سردية سريرية كاملة (تاريخ المرض +
+# نتائج MRI + الانطباع، مئات الكلمات) داخل خلية واحدة — قياس فعلي على نفس الملف:
+# كل الخلايا الحقيقية القصيرة (Name/ID/Age/Referral to...) ≤27 حرفاً، بينما خليتا
+# السرد السريري (نسخة عربية+إنجليزية متوازيتين) بلغتا 478 و1381 حرفاً — فجوة ضخمة
+# لا علاقة لها بأي جدول بيانات حقيقي (قيم قصيرة متكررة). النتيجة العملية: تفريغ
+# هذا السرد كاملاً في خلية جدول واحدة يُفجِّر تنسيق Word عند التصدير (خلية بمئات
+# الكلمات). **القرار:** لا نرفض الخط المرسوم نفسه (يبقى صحيحاً هندسياً)، بل نرفض
+# اعتبار *كامل المنطقة* جدولاً إن احتوت خلية بهذا الطول — تُترَك كلماتها لتتدفّق
+# كفقرات نص عادية (نفس مسار Vision الطبيعي) بدل جدول. 150 حرفاً هامش كبير فوق
+# 27 (أطول خلية قصيرة حقيقية مُلاحَظة) ودون 478 (أقصر خلية سردية مُلاحَظة).
+_RULED_TABLE_MAX_CELL_CHARS = 150
 # أصغر قفزة نسبية بين فجوتين متتاليتين (مُرتَّبتين، بعد تجاهل ما دون
 # `_SCANNED_TABLE_MIN_GAP_FOR_RATIO_CHECK`) تُعتبر انفصالاً حقيقياً بين "تباعد كلمات
 # عادي" و"فجوة عمود جدول" — انظر `_find_gap_threshold`.
@@ -841,6 +854,14 @@ def _looks_like_non_clinical_metadata(rows: List[List[str]]) -> bool:
     return numeric_fraction < _MIN_NUMERIC_CELL_FRACTION
 
 
+def _has_narrative_cell(rows: List[List[str]], max_cell_chars: int = _RULED_TABLE_MAX_CELL_CHARS) -> bool:
+    """يتحقق إن كانت إحدى خلايا المنطقة تحوي فقرة سردية طويلة (نص حر متدفّق) بدل
+    قيمة جدول قصيرة — انظر توثيق `_RULED_TABLE_MAX_CELL_CHARS` للقياس الفعلي الذي
+    بُني عليه هذا الحد. يُستخدَم مع الجداول ذات الخطوط المرسومة تحديداً (استمارات قد
+    تحوي حقل نص حر واحد وسط حقول قصيرة عادية)."""
+    return any(len(cell) > max_cell_chars for row in rows for cell in row)
+
+
 def _has_inconsistent_row_lengths(rows: List[List[str]]) -> bool:
     """يتحقق إن كانت أطوال صفوف المنطقة (عدد الخلايا) غير متّسقة نسبياً — إشارة على
     نص متناثر حول رسم بياني (تسميات محاور رقمية، مفاتيح دلالية مثل
@@ -1155,7 +1176,13 @@ def _detect_ruled_table_regions(image_bytes: bytes, words: List[dict]) -> List[d
     عن محتواه — لا يخضع لفلاتر `_looks_like_non_clinical_metadata`/
     `_has_inconsistent_row_lengths` (تلك مخصَّصة للاكتشاف الهندسي من النص بلا حدود،
     حيث لا يوجد دليل بصري مباشر على وجود جدول أصلاً). خطوط الشبكة الحقيقية إشارة
-    أقوى وأوثق من أي تحليل محتوى."""
+    أقوى وأوثق من أي تحليل محتوى.
+
+    **استثناء واحد مضاف لاحقاً (`_has_narrative_cell`):** استمارة فيها خط شبكة حقيقي
+    لكن إحدى خلاياها تحوي فقرة سردية حرة طويلة (مثال: حقل "شكوى المريض" في استمارة
+    إحالة) لا تُعتبر جدول بيانات حقيقياً — رغم صحة الخط نفسه هندسياً. تُرفَض المنطقة
+    كاملةً فتتدفّق كلماتها كفقرات نص عادية بدل خلية جدول واحدة تُفجِّر التنسيق عند
+    التصدير. انظر توثيق `_RULED_TABLE_MAX_CELL_CHARS` للقياس الفعلي."""
     masks = _ruled_line_masks(image_bytes)
     if masks is None:
         return []
@@ -1185,6 +1212,8 @@ def _detect_ruled_table_regions(image_bytes: bytes, words: List[dict]) -> List[d
         region_words = [w for w in words if x0 <= (w["x0"] + w["x1"]) / 2 <= x1 and y0 <= (w["top"] + w["bottom"]) / 2 <= y1]
         rows = _assign_words_to_grid(region_words, row_bounds, col_bounds)
         if not any(cell for row in rows for cell in row):
+            continue
+        if _has_narrative_cell(rows):
             continue
         regions.append({"rows": rows, "bbox": BoundingBox(x0=x0, y0=y0, x1=x1, y1=y1)})
 

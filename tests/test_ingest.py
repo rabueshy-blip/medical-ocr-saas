@@ -769,6 +769,20 @@ class TestDetectRuledTableRegions(unittest.TestCase):
         rows = _strip_empty_border_cells(regions[0]["rows"])
         self.assertEqual(rows, [["Patient Name", "Gender"], ["Bndr Al Jehani", "Male"]])
 
+    def test_form_with_one_narrative_cell_is_rejected_as_table(self):
+        # حالة حقيقية أبلغ عنها المستخدم: استمارة إحالة حقيقية بخطوط مرسومة صحيحة،
+        # لكن خلية "شكوى المريض" تحوي فقرة سردية سريرية كاملة (مئات الكلمات) بدل قيمة
+        # جدول قصيرة. جدول بيانات حقيقي بلا أي خلية سردية طويلة (كالاختبار أعلاه) يجب
+        # أن يبقى مكتشَفاً، لكن هذه المنطقة يجب أن تُرفَض بالكامل فتتدفّق كلماتها كنص
+        # عادي بدل خلية جدول واحدة تُفجِّر التنسيق عند التصدير.
+        image_bytes = _draw_ruled_grid_png(row_ys=[100, 250, 400], col_xs=[100, 400, 700])
+        narrative = "CC : LOW BACK PAIN . " * 10  # أطول من _RULED_TABLE_MAX_CELL_CHARS
+        words = self._words(["Patient Name", "Gender"], [narrative, "Male"])
+
+        regions = ingest_module._detect_ruled_table_regions(image_bytes, words)
+
+        self.assertEqual(regions, [])
+
 
 class TestDropOverlappingBoxes(unittest.TestCase):
     """خلل حقيقي: دمج صندوقين متداخلين (جدول حقيقي + شعار/ختم مُزخرَف ملتصق بحافته)
