@@ -83,6 +83,12 @@ export function UploadPanel() {
 
   return (
     <div className="flex h-full flex-col items-center justify-center gap-4">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src="/before-after.jpg"
+        alt="Medflow: before and after comparison"
+        className="w-full max-w-md rounded-lg"
+      />
       <p className="text-center text-zinc-700 dark:text-zinc-300">
         Upload Medical report, research, lecture, file, etc.
       </p>
