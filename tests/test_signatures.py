@@ -95,6 +95,24 @@ class TestIsCorrectionGrounded(unittest.TestCase):
             )
         )
 
+    def test_short_hallucinated_phrase_in_long_paragraph_is_rejected(self):
+        # حالة حقيقية أبلغ عنها المستخدم: عبارة مُهلوَسة قصيرة (كلمتان) داخل
+        # فقرة طويلة تشابهها الكلي مرتفع (90.3%) فتمر عتبة char_similarity
+        # القديمة (55%) وحتى الجديدة (85%) بسهولة، لكن max_extra_words هو ما
+        # يوقفها (فرق كلمتين > 1).
+        raw = (
+            "خلص الفحص السريري الى ان المريض يعانى من التهاب حاد فى الجهاز "
+            "التنفسى العلوى ويحتاج الى راحه تامه وشرب سوائل كافيه مع متابعه "
+            "دوريه لدى الطبيب المختص خلال الاسبوع القادم لتقييم الاستجابه للعلاج الموصوف"
+        )
+        corrected = (
+            "خلص الفحص السريري إلى أن المريض يعاني من التهاب حاد في مستيك "
+            "الجيم الجهاز التنفسي العلوي ويحتاج إلى راحة تامة وشرب سوائل "
+            "كافية مع متابعة دورية لدى الطبيب المختص خلال الأسبوع القادم "
+            "لتقييم الاستجابة للعلاج الموصوف"
+        )
+        self.assertFalse(is_correction_grounded(raw, corrected))
+
 
 class TestNumericTokensPreserved(unittest.TestCase):
     def test_identical_numbers_pass(self):

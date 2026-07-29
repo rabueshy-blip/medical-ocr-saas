@@ -94,11 +94,20 @@ def numeric_tokens_preserved(raw_text: str, corrected_text: str) -> bool:
 def is_correction_grounded(
     raw_text: str,
     corrected_text: str,
-    min_char_similarity: float = 55.0,
-    max_extra_words: int = 2,
+    min_char_similarity: float = 85.0,
+    max_extra_words: int = 1,
 ) -> bool:
     """قيد ترسيخ برمجي: يرفض تصحيحاً يعيد صياغة النص كلياً، يضيف كلمات كثيرة
-    جديدة، أو يغيّر رقماً صريحاً واضحاً (انظر numeric_tokens_preserved)."""
+    جديدة، أو يغيّر رقماً صريحاً واضحاً (انظر numeric_tokens_preserved).
+
+    العتبات (2026-07-29): كانت 55%/كلمتين إضافيتين في الأصل — سمحت لعبارات
+    مُهلوَسة قصيرة (كلمة أو كلمتان) بالمرور لأن التشابه الكلي لفقرة طويلة لا
+    يتأثر كثيراً بإضافة صغيرة. رُفعت بناءً على قياس فعلي: تصحيحات إملائية
+    مشروعة (حتى فقرة كاملة بـ15 خطأ مطبعي) سجَّلت 92-97% تشابه، بينما إعادة
+    صياغة كاملة سجَّلت 27% فقط — فجوة كبيرة تسمح برفع العتبة لـ85% دون كسر
+    تصحيحات حقيقية. `max_extra_words=1` (بدل 2) يسمح بكلمة إضافية واحدة فقط
+    (مثال: فصل كلمة ملتصقة أنتجها OCR لكلمتين) لكن يمنع إضافة عبارة كاملة.
+    """
     if not raw_text.strip():
         return True
     char_similarity = fuzz.ratio(raw_text, corrected_text)
