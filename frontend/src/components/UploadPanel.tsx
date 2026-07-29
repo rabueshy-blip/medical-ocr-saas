@@ -83,6 +83,9 @@ export function UploadPanel() {
 
   return (
     <div className="flex h-full flex-col items-center justify-center gap-4">
+      <p className="text-center text-zinc-700 dark:text-zinc-300">
+        Upload Medical report, research, lecture, file, etc.
+      </p>
       <button
         type="button"
         onClick={() => inputRef.current?.click()}
@@ -93,7 +96,7 @@ export function UploadPanel() {
           ? progress
             ? `جارٍ الاستخراج... (${progress.page}/${progress.total})`
             : "جارٍ الاستخراج..."
-          : "ارفع ملف PDF"}
+          : "Try free (Up to 30 pages)"}
       </button>
       {status === "uploading" && (
         <div className="w-64">
