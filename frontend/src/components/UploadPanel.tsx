@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { extractDocument } from "@/lib/api";
+import { extractDocumentStream } from "@/lib/api";
 import { useDocumentStore } from "@/store/useDocumentStore";
 import { WHATSAPP_NUMBER } from "@/components/WhatsAppButton";
 import {
@@ -18,10 +18,12 @@ export function UploadPanel() {
   const inputRef = useRef<HTMLInputElement>(null);
   const status = useDocumentStore((state) => state.status);
   const errorMessage = useDocumentStore((state) => state.errorMessage);
+  const progress = useDocumentStore((state) => state.progress);
   const setFile = useDocumentStore((state) => state.setFile);
   const setDocument = useDocumentStore((state) => state.setDocument);
   const setStatus = useDocumentStore((state) => state.setStatus);
   const setError = useDocumentStore((state) => state.setError);
+  const setProgress = useDocumentStore((state) => state.setProgress);
 
   // getServerSnapshot (0) يُستخدَم فقط أثناء SSR/الرسم الأول (الخادم لا يملك
   // localStorage) — بعد hydration في المتصفح يُقرأ الرصيد الحقيقي مباشرة، ويعاد
@@ -46,8 +48,11 @@ export function UploadPanel() {
     if (!isUnlimited() && getPagesUsed() >= FREE_PAGE_LIMIT) return;
     setFile(file);
     setStatus("uploading");
+    setProgress(null);
     try {
-      const document = await extractDocument(file);
+      const document = await extractDocumentStream(file, (page, total) => {
+        setProgress({ page, total });
+      });
       setDocument(document);
       addPagesUsed(document.pages.length);
     } catch (err) {
@@ -84,8 +89,29 @@ export function UploadPanel() {
         disabled={status === "uploading"}
         className="rounded-lg bg-zinc-900 px-6 py-3 text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-white dark:text-zinc-900"
       >
-        {status === "uploading" ? "جارٍ الاستخراج..." : "ارفع ملف PDF"}
+        {status === "uploading"
+          ? progress
+            ? `جارٍ الاستخراج... (${progress.page}/${progress.total})`
+            : "جارٍ الاستخراج..."
+          : "ارفع ملف PDF"}
       </button>
+      {status === "uploading" && (
+        <div className="w-64">
+          <div className="h-2 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800">
+            <div
+              className="h-full rounded-full bg-zinc-900 transition-all duration-300 dark:bg-white"
+              style={{
+                width: progress ? `${(progress.page / progress.total) * 100}%` : "8%",
+              }}
+            />
+          </div>
+          {progress && (
+            <p className="mt-1 text-center text-xs text-zinc-500">
+              صفحة {progress.page} من {progress.total}
+            </p>
+          )}
+        </div>
+      )}
       <input
         ref={inputRef}
         type="file"

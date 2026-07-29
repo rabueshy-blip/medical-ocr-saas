@@ -34,7 +34,7 @@ import statistics
 import time
 from functools import lru_cache
 from io import BytesIO
-from typing import List, Optional, Set
+from typing import Callable, List, Optional, Set
 
 import cv2
 import dspy
@@ -1476,7 +1476,11 @@ def _strip_repeated_page_headers(pages: List[Page]) -> None:
             page.blocks = page.blocks[match_count:]
 
 
-def extract_document(pdf_path: str, file_name: Optional[str] = None) -> Document:
+def extract_document(
+    pdf_path: str,
+    file_name: Optional[str] = None,
+    on_page_done: Optional[Callable[[int, int], None]] = None,
+) -> Document:
     """يفتح ملف PDF كاملاً ويحوّله إلى Document: نص رقمي عبر PyMuPDF + جداول pdfplumber
     للصفحات التي تحتوي طبقة نص، وOCR عبر Google Vision API (raster لكامل الصفحة) للصفحات
     الممسوحة ضوئياً بلا طبقة نص.
@@ -1484,7 +1488,13 @@ def extract_document(pdf_path: str, file_name: Optional[str] = None) -> Document
     فشل استخراج صفحة ممسوحة واحدة عبر Vision API (بعد استنفاد إعادة المحاولة في
     `_call_vision_api`) لا يوقف استخراج بقية المستند — تُسجَّل الصفحة بـ Block واحد
     يوضّح الفشل بنص عربي صريح (confidence=0.0) بدل رفع استثناء يفقد نتائج كل الصفحات
-    الأخرى الناجحة."""
+    الأخرى الناجحة.
+
+    `on_page_done` (اختياري): استدعاء بعد كل صفحة (رقم الصفحة المُنجزة، العدد الكلي) —
+    مستند 30 صفحة ممسوحة (الحد الأقصى للخطة المجانية) قِيس فعلياً بحوالي 157 ثانية
+    (~5.2s/صفحة، استدعاء Vision API حقيقي متسلسل لكل صفحة، بلا أي تغذية راجعة أثناء
+    الانتظار) — الواجهة تحتاج معرفة تقدّم حقيقي لكل صفحة بدل شاشة تحميل صامتة تبدو
+    وكأنها عَلِقت. لا يُغيّر أي سلوك حالي عند تركه `None` (الافتراضي)."""
     fitz_doc = fitz.open(pdf_path)
     pages: List[Page] = []
     images: List[ImageAsset] = []
@@ -1526,6 +1536,8 @@ def extract_document(pdf_path: str, file_name: Optional[str] = None) -> Document
                     ]
 
             pages.append(Page(page_number=index + 1, source=source, blocks=blocks))
+            if on_page_done is not None:
+                on_page_done(index + 1, fitz_doc.page_count)
 
     fitz_doc.close()
     _strip_repeated_page_headers(pages)

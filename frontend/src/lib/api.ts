@@ -76,6 +76,65 @@ export async function extractDocument(file: File): Promise<Document> {
   return response.data;
 }
 
+/** نسخة Server-Sent Events من `extractDocument` — نفس النتيجة النهائية بالضبط، لكن
+ * تستدعي `onProgress` بعد كل صفحة منجزة أثناء الانتظار. مستند 30 صفحة ممسوحة (حد
+ * الخطة المجانية) يستغرق فعلياً ~2.5 دقيقة (استدعاء Vision API حقيقي متسلسل لكل
+ * صفحة) — بلا هذا التقدّم، الواجهة تبقى شاشة تحميل صامتة تبدو "عالقة" طوال المدة.
+ * axios لا يدعم قراءة SSE قطعة-بقطعة بسهولة هنا، فنستخدم `fetch` مباشرة. */
+export async function extractDocumentStream(
+  file: File,
+  onProgress: (page: number, total: number) => void,
+): Promise<Document> {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const headers: Record<string, string> = {};
+  if (process.env.NEXT_PUBLIC_API_KEY) {
+    headers["X-API-Key"] = process.env.NEXT_PUBLIC_API_KEY;
+  }
+
+  const response = await fetch(`${API_BASE_URL}/extract-document-stream`, {
+    method: "POST",
+    headers,
+    body: formData,
+  });
+
+  if (!response.ok || !response.body) {
+    throw new Error(`تعذّر الاتصال بخادم الاستخراج (HTTP ${response.status})`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    // كل حدث SSE مفصول بسطر فارغ (\n\n)؛ آخر جزء غير مكتمل يبقى في buffer لحين
+    // اكتمال القطعة التالية من الشبكة.
+    const parts = buffer.split("\n\n");
+    buffer = parts.pop() ?? "";
+
+    for (const part of parts) {
+      const line = part.split("\n").find((l) => l.startsWith("data: "));
+      if (!line) continue;
+      const payload = JSON.parse(line.slice("data: ".length));
+
+      if (payload.type === "progress") {
+        onProgress(payload.page, payload.total);
+      } else if (payload.type === "done") {
+        return payload.document as Document;
+      } else if (payload.type === "error") {
+        throw new Error(payload.message || "تعذّر استخراج المستند");
+      }
+    }
+  }
+
+  throw new Error("انقطع الاتصال بخادم الاستخراج قبل اكتمال العملية");
+}
+
 export type ExportFormat = "docx" | "pdf";
 
 export interface ExportImage {

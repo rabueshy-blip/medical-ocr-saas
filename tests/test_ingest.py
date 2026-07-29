@@ -87,6 +87,24 @@ class TestExtractDocument(unittest.TestCase):
             joined_text = " ".join(b.text for b in paragraph_blocks)
             self.assertIn("blood pressure", joined_text)
 
+    def test_on_page_done_callback_fires_once_per_page_with_correct_totals(self):
+        # مؤشر التقدّم في الواجهة (UploadPanel.tsx) يعتمد على هذا الاستدعاء ليعرض
+        # "صفحة N من M" أثناء استخراج مستند متعدد الصفحات — طُلب بعد قياس فعلي أن
+        # مستند 30 صفحة ممسوحة يستغرق ~2.5 دقيقة بلا أي تغذية راجعة للمستخدم.
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pdf_path = os.path.join(tmp_dir, "multi.pdf")
+            doc = fitz.open()
+            for i in range(3):
+                page = doc.new_page()
+                page.insert_text((72, 72), f"Page {i + 1} content")
+            doc.save(pdf_path)
+            doc.close()
+
+            calls = []
+            extract_document(pdf_path, on_page_done=lambda page, total: calls.append((page, total)))
+
+            self.assertEqual(calls, [(1, 3), (2, 3), (3, 3)])
+
     def test_digital_page_extracts_real_grid_table_via_pdfplumber(self):
         rows = [["Drug", "Dose"], ["Metformin", "500mg"], ["Aspirin", "100mg"]]
         with tempfile.TemporaryDirectory() as tmp_dir:
