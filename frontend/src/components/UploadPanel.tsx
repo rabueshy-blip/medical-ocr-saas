@@ -87,7 +87,7 @@ export function UploadPanel() {
       <img
         src="/before-after.jpg"
         alt="Medflow: before and after comparison"
-        className="w-full max-w-md rounded-lg"
+        className="mb-2 w-full max-w-md rounded-lg"
       />
       <p className="text-center text-zinc-700 dark:text-zinc-300">
         Upload Medical report, research, lecture, file, etc.
