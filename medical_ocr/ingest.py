@@ -148,6 +148,22 @@ _SCANNED_TABLE_MIN_GAP_FOR_RATIO_CHECK = 5.0
 # بمسافة بيضاء واضحة، وليس صفاً تالياً لنفس الجدول — انظر `_detect_scanned_table_regions`.
 _SCANNED_TABLE_MAX_VERTICAL_GAP_RATIO = 2.5
 
+# ترتيب Blocks متعدد الأعمدة (`_sort_blocks_by_position`): صفحات كتب/مراجع أكاديمية
+# (خلاف التقارير الطبية أحادية العمود التي اختُبر ضدها هذا المشروع سابقاً) غالباً
+# عمودان — الفرز بمجرد bbox.y0 وحده يُلحِم فقرة من عمود يمين بفقرة من عمود يسار
+# بنفس الارتفاع تقريباً، فيخلط جملة نصف صفحة يسرى بنصف صفحة يمنى (خلل حقيقي مُشخَّص
+# على صفحة Lindhe's Clinical Periodontology، 2026-07-29). Block أعرض من هذه النسبة
+# من عرض المحتوى الكلي يُعتبر "ممتداً" (عنوان/صورة/تعليق يعبر خط المنتصف) وليس عموداً.
+_COLUMN_FULL_WIDTH_RATIO = 0.6
+# لا يُعاد ترتيب مقطع كعمودين إلا إن كان لكل جهة (يسار/يمين) هذا العدد الأدنى من
+# Blocks على الأقل. 1 (وليس أعلى) لأن الحماية الفعلية من الإيجابيات الكاذبة تأتي من
+# `_classify_block_column` نفسها: Block عادي أحادي العمود يمتد عادة عبر خط المنتصف
+# (يُصنَّف "full" ويُستبعَد من يسار/يمين كلياً)، فقط الأسطر القصيرة فعلاً (عنوان، آخر
+# سطر فقرة، خلية) تقع بالكامل في نصف واحد. **خلل حقيقي أثبت أن 2 عالٍ جداً:** فقرتا
+# عمودين حقيقيتين في نفس الصف قد تكونا فقرة واحدة لكل جانب فقط (وليس عدة فقرات) —
+# طلب ≥2 لكل جهة منع تصحيح هذه الحالة الحقيقية بالضبط في صفحة Lindhe's.
+_MIN_BLOCKS_PER_COLUMN_TO_REORDER = 1
+
 logger = logging.getLogger(__name__)
 
 _easyocr_reader = None
@@ -225,6 +241,15 @@ def _digital_page_blocks(page: fitz.Page, exclude_bboxes: Optional[List[tuple]] 
 
 _DEFAULT_TEXT_TOLERANCE = 5
 _MIN_TEXT_TOLERANCE = 1
+# أكبر عدد أعمدة مقبول لجدول اكتُشف عبر استراتيجية "text" (بلا خطوط، تخمين هندسي من
+# محاذاة النص فقط). خلل حقيقي مُشخَّص على صفحة حقيقية من كتاب مرجعي أكاديمي
+# (Lindhe's Clinical Periodontology، تخطيط عمودين + شكل توضيحي مُركَّب (a)-(p) وتعليقه):
+# استراتيجية "text" لم تكتشف "عموداً" واحداً منطقياً بل خمّنت شبكة 33 صفاً × 10 أعمدة من
+# محاذاة نص عمودين أكاديميين متجاورين + تعليق الشكل، لدرجة قص كلمات مفردة حرفياً
+# ("Reconstructive" → "Rec"/"onstructive" في عمودين منفصلين). كل جدول طبي حقيقي بلا
+# خطوط اختُبر فعلياً في هذا المشروع (نتائج مخبرية Result/Unit، معايير WHO، حقول استمارة)
+# لم يتجاوز 6 أعمدة — 8 هامش أمان فوقها يبقى أدنى بكثير من 10 (الحالة المُهلوَسة).
+_TEXT_TABLE_MAX_COLUMNS = 8
 
 
 def _cluster_lines(words: list) -> list:
@@ -318,18 +343,23 @@ def _dynamic_text_table_settings(pdfplumber_page) -> dict:
     }
 
 
-def _find_tables(pdfplumber_page):
+def _find_tables(pdfplumber_page) -> tuple[list, bool]:
     """يحاول اكتشاف الجداول أولاً بالإعدادات الافتراضية (تعتمد خطوط شبكة مرسومة فعلياً —
     الأدق حين تكون موجودة)، ثم يلجأ لاستراتيجية `"text"` (محاذاة نصية بلا خطوط) فقط إن
     لم يكتشف الإعداد الافتراضي أي جدول — كثير من جداول النتائج المخبرية الطبية ليس لها
     خطوط شبكة مرسومة أصلاً. تطبيق `"text"` مباشرة على جدول له خطوط فعلية يُفسِد النتيجة
     (يُنتج صفوفاً فارغة وهمية من المسافة حول الخطوط)، لذا الترتيب هنا مقصود وليس تبسيطاً.
     عند اللجوء لاستراتيجية `"text"`، التفاوت (`text_x/y_tolerance`) يُحسَب ديناميكياً لكل
-    صفحة عبر `_dynamic_text_table_settings` بدل قيمة ثابتة."""
+    صفحة عبر `_dynamic_text_table_settings` بدل قيمة ثابتة.
+
+    تُرجع `(tables, used_text_strategy)` — العلم ضروري في `_table_blocks` كي يُطبَّق
+    حد أقصى لعدد الأعمدة (`_TEXT_TABLE_MAX_COLUMNS`) على جداول "text" المخمَّنة فقط،
+    وليس على جداول خطوط حقيقية (تلك موثوقة دوماً بصرف النظر عن شكلها، بنفس مبدأ
+    `_detect_ruled_table_regions` للصفحات الممسوحة)."""
     tables = pdfplumber_page.find_tables()
     if tables:
-        return tables
-    return pdfplumber_page.find_tables(table_settings=_dynamic_text_table_settings(pdfplumber_page))
+        return tables, False
+    return pdfplumber_page.find_tables(table_settings=_dynamic_text_table_settings(pdfplumber_page)), True
 
 
 def _extract_table_rows(table) -> tuple[List[List[str]], List[List[int]]]:
@@ -370,13 +400,19 @@ def _extract_table_rows(table) -> tuple[List[List[str]], List[List[int]]]:
 
 def _table_blocks(pdfplumber_page) -> List[Block]:
     blocks = []
-    for table in _find_tables(pdfplumber_page):
+    tables, used_text_strategy = _find_tables(pdfplumber_page)
+    for table in tables:
         # حارس أمان: عرض الشبكة الفعلي (قبل أي دمج) يجب أن يكون عمودين على الأقل —
         # استراتيجية "text" الاحتياطية تتحمس أحياناً على نص عادي محاذى لليسار وتخترع
         # "جدولاً" بعمود واحد يكرر نفس الفقرات، وعمود واحد لا يمثّل جدولاً قابلاً
         # للترجمة عبر صفوف/أعمدة فعلية.
         grid_width = len(table.rows[0].cells) if table.rows else 0
         if grid_width < 2:
+            continue
+        # حارس ثانٍ لنفس استراتيجية "text" تحديداً (لا يُطبَّق على جداول خطوط حقيقية):
+        # صفحة بتخطيط أكاديمي متعدد الأعمدة + شكل توضيحي مُركَّب يمكن أن تُخمَّن كشبكة
+        # عريضة جداً (10+ عمود) بدل جدول بيانات حقيقي — انظر توثيق `_TEXT_TABLE_MAX_COLUMNS`.
+        if used_text_strategy and grid_width > _TEXT_TABLE_MAX_COLUMNS:
             continue
 
         rows, colspans = _extract_table_rows(table)
@@ -454,16 +490,70 @@ def _page_images(
     return images
 
 
+def _classify_block_column(block: Block, midline: float, full_width_threshold: float) -> str:
+    """يصنّف Block إلى "left"/"right"/"full" حسب موضعه الأفقي نسبة لخط منتصف
+    المحتوى — انظر توثيق `_sort_blocks_by_position` للسبب."""
+    width = block.bbox.x1 - block.bbox.x0
+    if full_width_threshold <= 0 or width >= full_width_threshold:
+        return "full"
+    if block.bbox.x1 <= midline:
+        return "left"
+    if block.bbox.x0 >= midline:
+        return "right"
+    return "full"
+
+
 def _sort_blocks_by_position(blocks: List[Block]) -> List[Block]:
-    """يرتّب Blocks حسب الموضع الرأسي الحقيقي (bbox.y0) بدل ترتيب الاستخراج — ضروري
-    كلما جُمعت Blocks من مصادر مختلفة (فقرات + جداول + placeholders) لا تصل بترتيب
-    قراءة صحيح من تلقاء نفسها. Blocks بلا bbox (نادرة، مثال بلوك خطأ Vision API) تبقى
-    بترتيبها النسبي الأصلي عبر مفتاح ترتيب مستقر (fallback إلى ما لا نهاية + الفهرس
-    الأصلي)."""
-    ordered = sorted(
-        enumerate(blocks),
-        key=lambda pair: (pair[1].bbox.y0 if pair[1].bbox else float("inf"), pair[0]),
-    )
+    """يرتّب Blocks بترتيب قراءة صحيح — ضروري كلما جُمعت Blocks من مصادر مختلفة
+    (فقرات + جداول + placeholders) لا تصل بترتيب قراءة صحيح من تلقاء نفسها.
+
+    **أساسي:** الموضع الرأسي الحقيقي (bbox.y0). **لكن** صفحات ذات تخطيط عمودين
+    (كتب/مراجع أكاديمية، خلاف التقارير الطبية أحادية العمود المُختبَرة سابقاً في هذا
+    المشروع) تكسر فرز y0 البسيط: فقرة من العمود الأيمن بنفس ارتفاع فقرة من العمود
+    الأيسر تلتحم معها في تسلسل واحد مبعثر يخلط نصف الجملتين. الحل: بين أي "معلمين
+    ممتدين" (عنوان/صورة/تعليق يعبر عرض المحتوى بالكامل تقريباً)، إن وُجد عدد كافٍ من
+    Blocks في كل جهة (`_MIN_BLOCKS_PER_COLUMN_TO_REORDER`) تُرتَّب الجهة اليسرى كاملة
+    (بترتيب y0 الداخلي) ثم اليمنى كاملة، بدل تشابك الجهتين. أقل من ذلك (لا دليل كافٍ
+    على عمودين حقيقيين) يبقى الترتيب الافتراضي بـy0 وحده كما كان دوماً.
+
+    Blocks بلا bbox (نادرة، مثال بلوك خطأ Vision API) تبقى في النهاية بترتيبها
+    النسبي الأصلي (نفس سلوك fallback إلى ما لا نهاية القديم)."""
+    indexed = list(enumerate(blocks))
+    with_bbox = [pair for pair in indexed if pair[1].bbox is not None]
+    without_bbox = [pair for pair in indexed if pair[1].bbox is None]
+
+    if not with_bbox:
+        return blocks
+
+    y0_sorted = sorted(with_bbox, key=lambda pair: (pair[1].bbox.y0, pair[0]))
+
+    min_x0 = min(pair[1].bbox.x0 for pair in with_bbox)
+    max_x1 = max(pair[1].bbox.x1 for pair in with_bbox)
+    full_width_threshold = (max_x1 - min_x0) * _COLUMN_FULL_WIDTH_RATIO
+    midline = (min_x0 + max_x1) / 2
+
+    ordered: List[tuple] = []
+    segment: List[tuple] = []
+
+    def flush_segment() -> None:
+        left = [pair for pair in segment if _classify_block_column(pair[1], midline, full_width_threshold) == "left"]
+        right = [pair for pair in segment if _classify_block_column(pair[1], midline, full_width_threshold) == "right"]
+        if len(left) >= _MIN_BLOCKS_PER_COLUMN_TO_REORDER and len(right) >= _MIN_BLOCKS_PER_COLUMN_TO_REORDER:
+            ordered.extend(left)
+            ordered.extend(right)
+        else:
+            ordered.extend(segment)
+        segment.clear()
+
+    for pair in y0_sorted:
+        if _classify_block_column(pair[1], midline, full_width_threshold) == "full":
+            flush_segment()
+            ordered.append(pair)
+        else:
+            segment.append(pair)
+    flush_segment()
+
+    ordered.extend(sorted(without_bbox, key=lambda pair: pair[0]))
     return [block for _, block in ordered]
 
 

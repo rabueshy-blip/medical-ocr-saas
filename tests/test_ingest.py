@@ -19,7 +19,7 @@ from medical_ocr.ingest import (
     _get_vision_api_key,
     extract_document,
 )
-from medical_ocr.schema import BlockType, PageSource, SourceEngine
+from medical_ocr.schema import Block, BlockType, BoundingBox, PageSource, SourceEngine
 
 
 def _make_pdf(path: str, text: str = None) -> None:
@@ -895,6 +895,55 @@ class TestScannedPageTableIntegration(unittest.TestCase):
 
         # ترتيب القراءة: الفقرة (أعلى الصفحة) يجب أن تسبق الجدول في قائمة blocks.
         self.assertLess(blocks.index(paragraph_blocks[0]), blocks.index(table_blocks[0]))
+
+
+def _text_block(x0, y0, x1, y1, text) -> Block:
+    return Block(
+        block_type=BlockType.PARAGRAPH,
+        text=text,
+        bbox=BoundingBox(x0=x0, y0=y0, x1=x1, y1=y1),
+        confidence=1.0,
+        source_engine=SourceEngine.PYMUPDF,
+    )
+
+
+class TestSortBlocksByPosition(unittest.TestCase):
+    """خلل حقيقي مُشخَّص على صفحة حقيقية من كتاب مرجعي أكاديمي (Lindhe's Clinical
+    Periodontology، تخطيط عمودين): الفرز بمجرد bbox.y0 يُلحِم فقرة عمود يمين بفقرة
+    عمود يسار بنفس الارتفاع تقريباً، فيُنتج ترتيب قراءة مبعثراً يخلط نصفَي الصفحة."""
+
+    def test_single_column_page_keeps_pure_y0_order(self):
+        # صفحة تقرير طبي عادية أحادية العمود (نمط كل الاختبارات السابقة في هذا
+        # المشروع) — يجب ألا يتغيّر سلوكها إطلاقاً بعد إضافة منطق الأعمدة.
+        b1 = _text_block(50, 50, 550, 70, "Patient report header")
+        b2 = _text_block(50, 100, 550, 120, "Blood pressure 140/90 mmHg")
+        b3 = _text_block(50, 150, 550, 170, "Follow-up in two weeks")
+
+        result = ingest_module._sort_blocks_by_position([b3, b1, b2])
+
+        self.assertEqual([b.text for b in result], [b1.text, b2.text, b3.text])
+
+    def test_two_column_paragraphs_are_read_left_then_right(self):
+        # نفس هندسة الخلل الحقيقي: عنوان ممتد (full-width) يعبر خط المنتصف، ثم فقرتا
+        # عمودين حقيقيتين بنفس الارتفاع تقريباً (فرق كسري في y0 كما يحدث فعلياً بسبب
+        # قياسات الخط) — يجب أن تُقرأ اليسرى كاملة قبل اليمنى، لا بترتيب y0 الخام.
+        heading = _text_block(50, 20, 560, 40, "Full width heading")
+        left = _text_block(50, 736.22, 290, 800, "LEFT paragraph")
+        right = _text_block(310, 736.21, 560, 800, "RIGHT paragraph")  # y0 أصغر قليلاً
+
+        result = ingest_module._sort_blocks_by_position([heading, right, left])
+
+        self.assertEqual([b.text for b in result], [heading.text, left.text, right.text])
+
+    def test_narrow_single_column_blocks_are_not_reordered_as_columns(self):
+        # فقرتان ضيقتان (أقصر من عرض الصفحة) لكن **متتاليتان رأسياً بلا تداخل** —
+        # عمود واحد فعلي بمحاذاة يسرى، وليس عمودين. يجب أن يبقى ترتيب y0 كما هو.
+        b1 = _text_block(50, 50, 300, 70, "Short line one")
+        b2 = _text_block(50, 100, 300, 120, "Short line two")
+
+        result = ingest_module._sort_blocks_by_position([b2, b1])
+
+        self.assertEqual([b.text for b in result], [b1.text, b2.text])
 
 
 if __name__ == "__main__":
