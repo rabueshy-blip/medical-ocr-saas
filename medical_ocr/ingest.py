@@ -127,6 +127,33 @@ _RULED_TABLE_LINE_COVERAGE_RATIO = 0.15
 # كفقرات نص عادية (نفس مسار Vision الطبيعي) بدل جدول. 150 حرفاً هامش كبير فوق
 # 27 (أطول خلية قصيرة حقيقية مُلاحَظة) ودون 478 (أقصر خلية سردية مُلاحَظة).
 _RULED_TABLE_MAX_CELL_CHARS = 150
+
+# اكتشاف صور/أشكال داخل صفحة ممسوحة (`_detect_scanned_photo_regions`) — الصفحة كلها
+# بيتماب واحد بلا كائنات PDF صور منفصلة (خلاف `_page_images` للصفحات الرقمية)، لذا
+# التمييز هنا بمعالجة صورة خام: عتبة تباين لفصل "الحبر" (نص أو صورة) عن الخلفية.
+# عتبة 220 (وليس أقصى 255): اختُبرت فعلياً ضد لقطة شاشة حقيقية لصفحة كتاب (مونتاج
+# Fig. 80.6/80.7 — أشعة + رسوم توضيحية) وفصلت المحتوى عن الخلفية بدقة.
+_SCANNED_IMAGE_INK_THRESHOLD = 220
+# **درس حاسم من نفس الاختبار الحقيقي:** أي عملية إغلاق (closing) أو تمديد (dilation)
+# مورفولوجي ولو بنواة صغيرة (5×5) ألحمت لوحات Fig. 80.7 المتجاورة (9 لوحات A-I) في
+# مكوّن واحد ضخم رغم وجود فجوة بيضاء حقيقية بينها (حدود كل لوحة مرسومة بخط رفيع قريب
+# جداً من اللوحة المجاورة). العتبة الخام وحدها (بلا أي معالجة لاحقة) فصلت اللوحات
+# التسعة بدقة تامة (كل واحدة مكوّن منفصل مطابق تماماً لحجم اللوحة الحقيقي). لذا
+# **يُمنَع أي إغلاق/تمديد عمداً** في `_detect_scanned_photo_regions` — خلافاً لبقية
+# دوال معالجة الصورة في هذا الملف التي تعتمد عليه (`_ruled_line_masks` مثلاً).
+_SCANNED_IMAGE_MIN_DIMENSION_PX = 40
+_SCANNED_IMAGE_MIN_AREA_PX = 1500
+# مكوّن يغطي هذه النسبة أو أكثر من عرض **و**ارتفاع الصفحة معاً يُستبعَد — التحام كاذب
+# عبر القماشة كاملة (لوحظ فعلياً: مكوّن بعرض الصفحة الكامل 100% تماماً)، نفس فئة خلل
+# ظل/حافة الصفحة المُعالَجة سابقاً في `_drop_oversized_line_components`، وليس شكلاً
+# حقيقياً واحداً بهذا الحجم.
+_SCANNED_IMAGE_MAX_PAGE_SPAN_RATIO = 0.92
+# أعلى نسبة تغطية بمساحة كلمات Vision المكتشَفة داخل حدود مكوّن كي يُعتبر "صورة" لا
+# نصاً/صندوق نص ملوَّن (مثال: BOX 80.2 بخلفية بيج في نفس صفحة الاختبار). قياس فعلي:
+# لوحات الصور الحقيقية (Fig. 80.6/80.7) ≈0.0-0.01، بينما صندوق النص ونثر ملتحم عبر
+# حافة الصفحة ≈0.2-0.47 — فجوة واضحة، 0.1 عتبة آمنة بهامش كبير من الجهتين.
+_SCANNED_IMAGE_MAX_TEXT_COVERAGE_RATIO = 0.1
+
 # أصغر قفزة نسبية بين فجوتين متتاليتين (مُرتَّبتين، بعد تجاهل ما دون
 # `_SCANNED_TABLE_MIN_GAP_FOR_RATIO_CHECK`) تُعتبر انفصالاً حقيقياً بين "تباعد كلمات
 # عادي" و"فجوة عمود جدول" — انظر `_find_gap_threshold`.
@@ -1363,6 +1390,81 @@ def _scanned_table_blocks(image_bytes: bytes, words: List[dict]) -> List[Block]:
     return blocks
 
 
+def _detect_scanned_photo_regions(image_bytes: bytes, words: List[dict]) -> List[BoundingBox]:
+    """يكتشف صوراً/أشكالاً حقيقية (رسوم توضيحية، أشعة، صور سريرية) داخل صفحة ممسوحة
+    بيتماب واحد بلا كائنات PDF صور منفصلة (خلاف `_page_images` للصفحات الرقمية،
+    التي تستخرج كائنات صور مضمَّنة فعلياً) — عبر عتبة تباين خام فقط، بلا أي إغلاق أو
+    تمديد مورفولوجي. انظر توثيق `_SCANNED_IMAGE_INK_THRESHOLD` أعلى الملف لسبب منع
+    الإغلاق/التمديد عمداً (خلل حقيقي: يُلحم لوحات شكل متجاورة في مكوّن واحد ضخم).
+
+    يُميَّز "الصورة الحقيقية" عن "نص/صندوق نص ملوَّن" عبر نسبة تغطية كلمات Vision
+    المكتشَفة داخل حدود كل مكوّن (`_SCANNED_IMAGE_MAX_TEXT_COVERAGE_RATIO`) — صورة
+    حقيقية قد تحوي تسمية قصيرة جداً (حرف واحد "A"/"B") لكن لا تُغطّى بكلمات نصياً
+    بأي قدر معتبر، خلافاً لفقرة أو صندوق نص."""
+    gray = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_GRAYSCALE)
+    if gray is None:
+        return []
+    height, width = gray.shape
+    _, mask = cv2.threshold(gray, _SCANNED_IMAGE_INK_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
+
+    count, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    regions: List[BoundingBox] = []
+    for i in range(1, count):
+        x = stats[i, cv2.CC_STAT_LEFT]
+        y = stats[i, cv2.CC_STAT_TOP]
+        w = stats[i, cv2.CC_STAT_WIDTH]
+        h = stats[i, cv2.CC_STAT_HEIGHT]
+        area = stats[i, cv2.CC_STAT_AREA]
+        if w < _SCANNED_IMAGE_MIN_DIMENSION_PX or h < _SCANNED_IMAGE_MIN_DIMENSION_PX:
+            continue
+        if area < _SCANNED_IMAGE_MIN_AREA_PX:
+            continue
+        if w >= width * _SCANNED_IMAGE_MAX_PAGE_SPAN_RATIO and h >= height * _SCANNED_IMAGE_MAX_PAGE_SPAN_RATIO:
+            continue
+
+        x0, y0, x1, y1 = int(x), int(y), int(x + w), int(y + h)
+        box_area = w * h
+        word_area = sum(
+            max(0.0, min(x1, wd["x1"]) - max(x0, wd["x0"])) * max(0.0, min(y1, wd["bottom"]) - max(y0, wd["top"]))
+            for wd in words
+        )
+        if word_area / box_area > _SCANNED_IMAGE_MAX_TEXT_COVERAGE_RATIO:
+            continue
+
+        regions.append(BoundingBox(x0=x0, y0=y0, x1=x1, y1=y1))
+    return regions
+
+
+def _scanned_photo_images(
+    image_bytes: bytes, regions: List[BoundingBox], page_number: int
+) -> List[ImageAsset]:
+    """يقصّ كل منطقة صورة مُكتشَفة (`_detect_scanned_photo_regions`) من بيتماب الصفحة
+    الممسوحة نفسه ويحوّلها PNG مستقلاً — نظير `_page_images` للصفحات الرقمية، لكن
+    القصّ هنا من صورة الصفحة كاملةً (لا كائن PDF صورة منفصل بحكم التعريف، الصفحة
+    الممسوحة أصلاً بيتماب واحد). `image_id` يُترَك فارغاً هنا ويُملأ لاحقاً في
+    `extract_document` (يحتاج عدّاداً عبر المستند كله)."""
+    if not regions:
+        return []
+    image = Image.open(BytesIO(image_bytes)).convert("RGB")
+    images: List[ImageAsset] = []
+    for index, region in enumerate(regions):
+        crop = image.crop((region.x0, region.y0, region.x1, region.y1))
+        buffer = BytesIO()
+        crop.save(buffer, format="PNG")
+        images.append(
+            ImageAsset(
+                page_number=page_number,
+                index=index,
+                mime_type="image/png",
+                data_base64=base64.b64encode(buffer.getvalue()).decode("ascii"),
+                width=crop.width,
+                height=crop.height,
+                bbox=region,
+            )
+        )
+    return images
+
+
 def _blocks_from_vision_page(vision_page: dict, exclude_bboxes: Optional[List[tuple]] = None) -> List[Block]:
     """يحوّل صفحة واحدة من fullTextAnnotation.pages[i] إلى Blocks (فقرة لكل paragraph).
 
@@ -1418,32 +1520,48 @@ def _blocks_from_vision_page(vision_page: dict, exclude_bboxes: Optional[List[tu
     return blocks
 
 
-def _scanned_page_blocks_vision(page: fitz.Page, dpi: int = 200) -> List[Block]:
+def _scanned_page_blocks_vision(
+    page: fitz.Page, page_number: int = 1, dpi: int = 200
+) -> tuple:
     """محرك OCR الأساسي الحالي للصفحات الممسوحة: يرستر الصفحة كاملة إلى PNG، يضغطها تحت
     حد حجم Vision API عند الحاجة (`_compress_image_to_limit`)، ثم يمرّرها لـ Google
     Vision API (DOCUMENT_TEXT_DETECTION).
 
-    اكتشاف الجداول (جديد): يُستخرَج bbox كل كلمة (`_vision_word_boxes`) وتُكتشَف مناطق
+    اكتشاف الجداول: يُستخرَج bbox كل كلمة (`_vision_word_boxes`) وتُكتشَف مناطق
     شبيهة بجداول من مصدرين (`_scanned_table_blocks`): خطوط شبكة مرسومة فعلياً (أولوية،
     عبر معالجة صورة)، ثم تباعد نصي هندسي بلا حدود على الباقي — Vision نفسه لا يعطي
     كيان جدول جاهزاً. كل منطقة مُكتشَفة تصير Block(TABLE) واحداً، والفقرات التي تقع
     داخل حدودها تُستبعَد من الفقرات العادية لتفادي تكرار النص، ثم يُعاد ترتيب الجميع
-    بالموضع الحقيقي (`_sort_blocks_by_position`) بدل إلحاق الجداول دوماً في النهاية."""
+    بالموضع الحقيقي (`_sort_blocks_by_position`) بدل إلحاق الجداول دوماً في النهاية.
+
+    اكتشاف الصور/الأشكال (جديد): `_detect_scanned_photo_regions` يكتشف صوراً حقيقية
+    داخل بيتماب الصفحة نفسه (خلاف `_page_images` للصفحات الرقمية) وتُستبعَد كلماتها/
+    فقراتها من التدفّق النصي العادي بنفس مبدأ استبعاد خلايا الجدول. يُعيد الآن tuple
+    (blocks, images) بدل List[Block] فقط — انظر موقع الاستدعاء في `extract_document`."""
     pixmap = page.get_pixmap(dpi=dpi)
     image_bytes = _compress_image_to_limit(pixmap.tobytes("png"))
 
     vision_response = _call_vision_api(image_bytes)
     full_text_annotation = vision_response.get("fullTextAnnotation")
     if not full_text_annotation or not full_text_annotation.get("pages"):
-        return []
+        return [], []
 
     blocks: List[Block] = []
+    images: List[ImageAsset] = []
     for vision_page in full_text_annotation["pages"]:
-        table_blocks = _scanned_table_blocks(image_bytes, _vision_word_boxes(vision_page))
+        words = _vision_word_boxes(vision_page)
+        photo_regions = _detect_scanned_photo_regions(image_bytes, words)
+        photo_bboxes = [(r.x0, r.y0, r.x1, r.y1) for r in photo_regions]
+        remaining_words = [
+            w for w in words if not _bbox_center_in_any((w["x0"], w["top"], w["x1"], w["bottom"]), photo_bboxes)
+        ]
+
+        table_blocks = _scanned_table_blocks(image_bytes, remaining_words)
         table_bboxes = [(b.bbox.x0, b.bbox.y0, b.bbox.x1, b.bbox.y1) for b in table_blocks if b.bbox]
-        paragraph_blocks = _blocks_from_vision_page(vision_page, exclude_bboxes=table_bboxes)
+        paragraph_blocks = _blocks_from_vision_page(vision_page, exclude_bboxes=table_bboxes + photo_bboxes)
         blocks.extend(_sort_blocks_by_position(paragraph_blocks + table_blocks))
-    return blocks
+        images.extend(_scanned_photo_images(image_bytes, photo_regions, page_number))
+    return blocks, images
 
 
 def _normalize_header_text(text: str) -> str:
@@ -1521,7 +1639,7 @@ def extract_document(
             else:
                 source = PageSource.SCANNED
                 try:
-                    blocks = _scanned_page_blocks_vision(fitz_page)
+                    blocks, page_images = _scanned_page_blocks_vision(fitz_page, index + 1)
                 except VisionAPIError as exc:
                     logger.warning(
                         "فشل استخراج الصفحة %d عبر Google Vision API: %s", index + 1, exc
@@ -1534,6 +1652,12 @@ def extract_document(
                             source_engine=SourceEngine.GOOGLE_VISION,
                         )
                     ]
+                    page_images = []
+
+                for image in page_images:
+                    images.append(image)
+                    image.image_id = f"Image_{len(images):02d}"
+                blocks = _insert_image_placeholders(blocks, page_images)
 
             pages.append(Page(page_number=index + 1, source=source, blocks=blocks))
             if on_page_done is not None:

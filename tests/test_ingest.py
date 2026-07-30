@@ -169,7 +169,7 @@ class TestExtractDocument(unittest.TestCase):
                 texts, ["Before the chart", "[Insert Image_01 here]", "After the chart"]
             )
 
-    @patch("medical_ocr.ingest._scanned_page_blocks_vision", return_value=[])
+    @patch("medical_ocr.ingest._scanned_page_blocks_vision", return_value=([], []))
     def test_blank_page_is_routed_to_scanned_ocr_path(self, mock_scanned_blocks):
         # لا نستدعي Google Vision API الحقيقي هنا — فقط نتحقق أن صفحة بلا طبقة نص
         # تُوجَّه لمسار OCR الممسوح، دون أي استدعاء شبكة حقيقي.
@@ -802,6 +802,85 @@ class TestDetectRuledTableRegions(unittest.TestCase):
         self.assertEqual(regions, [])
 
 
+class TestDetectScannedPhotoRegions(unittest.TestCase):
+    """اكتشاف صور/أشكال داخل صفحة ممسوحة (بيتماب واحد بلا كائنات PDF صور منفصلة) —
+    طُلب صراحة من المستخدم بعد رفع صفحة كتاب حقيقية (مونتاج Fig. 80.6/80.7: أشعة
+    ورسوم توضيحية) لم يُستخرَج منها أي صورة إطلاقاً (الصفحة كلها كانت تُعامَل كنص
+    OCR فقط، بلا أي مفهوم لصور فرعية داخلها)."""
+
+    def _blank_image(self, size=(900, 700)) -> Image.Image:
+        return Image.new("L", size, 255)
+
+    def _png_bytes(self, img: Image.Image) -> bytes:
+        buffer = BytesIO()
+        img.save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    def test_two_separated_photo_blocks_are_each_detected_separately(self):
+        # **درس حاسم من اختبار حقيقي:** إغلاق/تمديد مورفولوجي (حتى بنواة صغيرة) كان
+        # يُلحم لوحات متجاورة في مكوّن واحد رغم فجوة بيضاء حقيقية بينها — هذا الاختبار
+        # يتحقق أن العتبة الخام وحدها (بلا أي معالجة إضافية) تُبقيهما منفصلتين.
+        img = self._blank_image()
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([100, 100, 300, 300], fill=80)
+        draw.rectangle([500, 100, 750, 350], fill=120)
+
+        regions = ingest_module._detect_scanned_photo_regions(self._png_bytes(img), words=[])
+
+        boxes = sorted((r.x0, r.y0, r.x1, r.y1) for r in regions)
+        self.assertEqual(boxes, [(100.0, 100.0, 301.0, 301.0), (500.0, 100.0, 751.0, 351.0)])
+
+    def test_region_mostly_covered_by_ocr_words_is_excluded_as_text(self):
+        # تمييز "صورة حقيقية" عن "نص/صندوق نص" (مثال BOX 80.2 بخلفية ملوَّنة في
+        # الملف الحقيقي المُشخَّص) عبر نسبة تغطية كلمات Vision، لا شكل المحتوى.
+        img = self._blank_image()
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([100, 100, 400, 300], fill=80)  # ستُغطَّى بكلمات = نص
+        draw.rectangle([600, 100, 800, 300], fill=80)  # بلا أي كلمة فوقها = صورة
+
+        words = [{"x0": 100, "x1": 400, "top": 100, "bottom": 300}]
+        regions = ingest_module._detect_scanned_photo_regions(self._png_bytes(img), words)
+
+        self.assertEqual(len(regions), 1)
+        self.assertEqual((regions[0].x0, regions[0].y0, regions[0].x1, regions[0].y1), (600.0, 100.0, 801.0, 301.0))
+
+    def test_small_label_inside_photo_does_not_disqualify_it(self):
+        # تسمية قصيرة جداً (حرف واحد "A"/"B") داخل لوحة شكل حقيقية شائعة (مثال Fig.
+        # 80.7 A-I) يجب ألا تُسقطها من التصنيف كصورة — التغطية النصية ضئيلة جداً.
+        img = self._blank_image()
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([100, 100, 400, 400], fill=80)
+
+        words = [{"x0": 110, "x1": 120, "top": 110, "bottom": 125}]
+        regions = ingest_module._detect_scanned_photo_regions(self._png_bytes(img), words)
+
+        self.assertEqual(len(regions), 1)
+
+    def test_component_spanning_whole_page_is_excluded_as_artifact(self):
+        # مكوّن يلامس حواف الصورة كاملةً (عرض وارتفاع الصفحة معاً) هو التحام كاذب عبر
+        # القماشة كاملة (نفس فئة خلل ظل/حافة الصفحة الموثَّقة سابقاً في
+        # `_drop_oversized_line_components`)، وليس شكلاً حقيقياً واحداً بهذا الحجم.
+        img = self._blank_image()
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([0, 0, 899, 699], outline=0, width=5)
+
+        regions = ingest_module._detect_scanned_photo_regions(self._png_bytes(img), words=[])
+
+        self.assertEqual(regions, [])
+
+    def test_tiny_noise_speck_is_ignored(self):
+        img = self._blank_image()
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([100, 100, 110, 110], fill=80)
+
+        regions = ingest_module._detect_scanned_photo_regions(self._png_bytes(img), words=[])
+
+        self.assertEqual(regions, [])
+
+    def test_invalid_image_bytes_return_no_regions_without_crashing(self):
+        self.assertEqual(ingest_module._detect_scanned_photo_regions(b"not-an-image", []), [])
+
+
 class TestDropOverlappingBoxes(unittest.TestCase):
     """خلل حقيقي: دمج صندوقين متداخلين (جدول حقيقي + شعار/ختم مُزخرَف ملتصق بحافته)
     في اتحادهما كان يُخفِّض كثافة الخطوط الرأسية دون عتبة الكشف، فيفشل استخراج حدود
@@ -897,7 +976,7 @@ class TestScannedPageTableIntegration(unittest.TestCase):
         # `_compress_image_to_limit` بدون أخطاء — استدعاء Vision API نفسه مموَّه أعلاه.
         real_doc = fitz.open()
         real_page = real_doc.new_page()
-        blocks = ingest_module._scanned_page_blocks_vision(real_page)
+        blocks, _images = ingest_module._scanned_page_blocks_vision(real_page)
         real_doc.close()
 
         table_blocks = [b for b in blocks if b.block_type == BlockType.TABLE]
@@ -913,6 +992,91 @@ class TestScannedPageTableIntegration(unittest.TestCase):
 
         # ترتيب القراءة: الفقرة (أعلى الصفحة) يجب أن تسبق الجدول في قائمة blocks.
         self.assertLess(blocks.index(paragraph_blocks[0]), blocks.index(table_blocks[0]))
+
+
+class TestScannedPageImageExtractionIntegration(unittest.TestCase):
+    """اختبار تكامل كامل end-to-end (`extract_document`) لاكتشاف صور داخل صفحة ممسوحة
+    بلا أي طبقة نص رقمي: صفحة PDF حقيقية فيها شكلان مرسومان فعلياً (بلا نص PyMuPDF
+    قابل للاستخراج، فتُوجَّه لمسار OCR الممسوح)، مع تعليق نصي مموَّه عبر Vision API —
+    يجب أن يُستخرَج كل شكل كـImageAsset مستقل، مع Placeholder في مكانه الصحيح بين
+    الشكلين والتعليق، تماماً كما يحدث فعلاً للصفحات الرقمية (`_page_images`)."""
+
+    @patch("medical_ocr.ingest._call_vision_api")
+    def test_two_drawn_shapes_are_extracted_as_separate_images_with_placeholders(self, mock_call_vision_api):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pdf_path = os.path.join(tmp_dir, "scanned_with_shapes.pdf")
+            doc = fitz.open()
+            page = doc.new_page(width=595, height=842)
+
+            # شكلان حقيقيان (وليس نصاً) مفصولان بفجوة رأسية حقيقية — بلا أي طبقة نص
+            # رقمي في الصفحة كلها، فتُوجَّه حتماً لمسار OCR الممسوح في extract_document.
+            shape1 = page.new_shape()
+            shape1.draw_rect(fitz.Rect(50, 50, 250, 200))
+            shape1.finish(fill=(0.3, 0.3, 0.3), color=(0.3, 0.3, 0.3))
+            shape1.commit()
+
+            shape2 = page.new_shape()
+            shape2.draw_rect(fitz.Rect(50, 300, 250, 480))
+            shape2.finish(fill=(0.5, 0.5, 0.5), color=(0.5, 0.5, 0.5))
+            shape2.commit()
+
+            doc.save(pdf_path)
+            doc.close()
+            self.assertEqual(len(fitz.open(pdf_path)[0].get_text("text").strip()), 0)
+
+            # تعليق نصي (Vision مموَّه) أسفل الشكلين تماماً، بلا أي تداخل معهما —
+            # تحقّق أن نسبة تغطية كلماته لا تُسقط أياً من الشكلين من التصنيف كصورة.
+            scale = 200 / 72  # dpi=200 الافتراضي في _scanned_page_blocks_vision
+            caption_x0, caption_y0 = 50 * scale, 550 * scale
+            caption_x1, caption_y1 = 300 * scale, 570 * scale
+            vision_page = {
+                "blocks": [
+                    {
+                        "paragraphs": [
+                            {
+                                "boundingBox": {
+                                    "vertices": [
+                                        {"x": caption_x0, "y": caption_y0},
+                                        {"x": caption_x1, "y": caption_y0},
+                                        {"x": caption_x1, "y": caption_y1},
+                                        {"x": caption_x0, "y": caption_y1},
+                                    ]
+                                },
+                                "words": [
+                                    {
+                                        "symbols": [{"text": ch} for ch in "Caption"],
+                                        "boundingBox": {
+                                            "vertices": [
+                                                {"x": caption_x0, "y": caption_y0},
+                                                {"x": caption_x1, "y": caption_y0},
+                                                {"x": caption_x1, "y": caption_y1},
+                                                {"x": caption_x0, "y": caption_y1},
+                                            ]
+                                        },
+                                        "confidence": 0.95,
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ]
+            }
+            mock_call_vision_api.return_value = {"fullTextAnnotation": {"pages": [vision_page]}}
+
+            document = extract_document(pdf_path, file_name="scanned_with_shapes.pdf")
+
+            self.assertEqual(document.pages[0].source, PageSource.SCANNED)
+            self.assertEqual(len(document.images), 2)
+            self.assertEqual({img.image_id for img in document.images}, {"Image_01", "Image_02"})
+            for asset in document.images:
+                self.assertEqual(asset.mime_type, "image/png")
+                self.assertIsNotNone(asset.bbox)
+
+            texts = [b.text for b in document.pages[0].blocks if b.text]
+            self.assertEqual(
+                texts,
+                ["[Insert Image_01 here]", "[Insert Image_02 here]", "Caption"],
+            )
 
 
 def _text_block(x0, y0, x1, y1, text) -> Block:
