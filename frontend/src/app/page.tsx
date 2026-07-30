@@ -35,7 +35,13 @@ export default function Home() {
         ) : (
           <div className="grid h-full grid-cols-[1fr_1fr_220px]">
             <EditorPane onEditorReady={setEditor} />
-            <PdfPane file={file} />
+            {file.name.toLowerCase().endsWith(".pdf") ? (
+              <PdfPane file={file} />
+            ) : (
+              <div className="flex h-full items-center justify-center bg-zinc-100 p-6 text-center text-sm text-zinc-500 dark:bg-zinc-900">
+                No source preview available for PowerPoint files — edit the extracted content on the left.
+              </div>
+            )}
             <MediaLibrary />
           </div>
         )}

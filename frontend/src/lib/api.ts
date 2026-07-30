@@ -76,6 +76,21 @@ export async function extractDocument(file: File): Promise<Document> {
   return response.data;
 }
 
+/** استخراج ملف PowerPoint حديث (.pptx فقط) — انظر `medical_ocr/ingest_pptx.py`
+ * لسبب استبعاد .ppt القديم عمداً. لا streaming هنا (خلاف `extractDocumentStream`)
+ * لأن الاستخراج بنيوي مباشر (لا OCR/LM)، سريع بما يكفي لطلب HTTP عادي واحد. */
+export async function extractPptx(file: File): Promise<Document> {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const response = await apiClient.post<Document>(
+    "/extract-pptx",
+    formData,
+    { headers: { "Content-Type": "multipart/form-data" } },
+  );
+  return response.data;
+}
+
 /** نسخة Server-Sent Events من `extractDocument` — نفس النتيجة النهائية بالضبط، لكن
  * تستدعي `onProgress` بعد كل صفحة منجزة أثناء الانتظار. مستند 30 صفحة ممسوحة (حد
  * الخطة المجانية) يستغرق فعلياً ~2.5 دقيقة (استدعاء Vision API حقيقي متسلسل لكل

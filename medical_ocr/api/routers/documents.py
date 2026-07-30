@@ -22,6 +22,7 @@ from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
 from ...ingest import extract_document
+from ...ingest_pptx import extract_pptx_document
 from ...schema import Document
 from ..rate_limit import limiter
 
@@ -49,6 +50,34 @@ async def extract_document_endpoint(request: Request, file: UploadFile = File(..
     except Exception as exc:  # ملف تالف/ليس PDF فعلياً رغم الامتداد، إلخ
         logger.warning("فشل استخراج المستند %s: %s", file.filename, exc)
         raise HTTPException(status_code=422, detail=f"تعذّرت قراءة الملف كـ PDF صالح: {exc}") from exc
+    finally:
+        if tmp_path is not None:
+            os.unlink(tmp_path)
+
+
+@router.post("/extract-pptx", response_model=Document)
+@limiter.limit("20/minute")
+async def extract_pptx_endpoint(request: Request, file: UploadFile = File(...)) -> Document:
+    """يستخرج Document من ملف PowerPoint حديث (.pptx فقط، Office Open XML) — انظر
+    توثيق `ingest_pptx.py` لسبب استبعاد .ppt القديم عمداً (يحتاج LibreOffice/أداة
+    تحويل نظام غير متاحة في بيئة النشر الحالية). استخراج بنيوي مباشر (لا OCR/LM)،
+    فلا حاجة لنسخة streaming بتقدّم مرحلي كما في `/extract-document-stream`."""
+    if not (file.filename or "").lower().endswith(".pptx"):
+        raise HTTPException(status_code=422, detail="الملف المرفوع يجب أن يكون بصيغة .pptx (PowerPoint حديث)")
+
+    file_bytes = await file.read()
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pptx", delete=False) as tmp_file:
+            tmp_file.write(file_bytes)
+            tmp_path = tmp_file.name
+
+        return extract_pptx_document(tmp_path, file_name=file.filename)
+    except HTTPException:
+        raise
+    except Exception as exc:  # ملف تالف/ليس pptx صالحاً رغم الامتداد، إلخ
+        logger.warning("فشل استخراج عرض PowerPoint %s: %s", file.filename, exc)
+        raise HTTPException(status_code=422, detail=f"تعذّرت قراءة الملف كـ PowerPoint صالح: {exc}") from exc
     finally:
         if tmp_path is not None:
             os.unlink(tmp_path)

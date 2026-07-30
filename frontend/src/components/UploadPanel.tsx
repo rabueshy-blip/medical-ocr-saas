@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { extractDocumentStream } from "@/lib/api";
+import { extractDocumentStream, extractPptx } from "@/lib/api";
 import { useDocumentStore } from "@/store/useDocumentStore";
 import { WHATSAPP_NUMBER } from "@/components/WhatsAppButton";
 import {
@@ -50,9 +50,13 @@ export function UploadPanel() {
     setStatus("uploading");
     setProgress(null);
     try {
-      const document = await extractDocumentStream(file, (page, total) => {
-        setProgress({ page, total });
-      });
+      // ملفات PowerPoint (.pptx) تُستخرَج بنيوياً مباشرة (لا OCR/LM)، بلا حاجة
+      // لتقدّم مرحلي كما في PDF الممسوح — طلب واحد يكفي.
+      const document = file.name.toLowerCase().endsWith(".pptx")
+        ? await extractPptx(file)
+        : await extractDocumentStream(file, (page, total) => {
+            setProgress({ page, total });
+          });
       setDocument(document);
       addPagesUsed(document.pages.length);
     } catch (err) {
@@ -75,7 +79,7 @@ export function UploadPanel() {
           rel="noopener noreferrer"
           className="rounded-lg bg-[#25D366] px-6 py-3 text-white hover:opacity-90"
         >
-          تواصل معنا للاشتراك
+          Contact us to subscribe
         </a>
       </div>
     );
@@ -100,8 +104,8 @@ export function UploadPanel() {
       >
         {status === "uploading"
           ? progress
-            ? `جارٍ الاستخراج... (${progress.page}/${progress.total})`
-            : "جارٍ الاستخراج..."
+            ? `Extracting... (${progress.page}/${progress.total})`
+            : "Extracting..."
           : "Try free (Up to 30 pages)"}
       </button>
       {status === "uploading" && (
@@ -124,7 +128,7 @@ export function UploadPanel() {
       <input
         ref={inputRef}
         type="file"
-        accept="application/pdf"
+        accept="application/pdf,.pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation"
         // "hidden" (display:none) بدل هذا كان يمنع Safari من فتح نافذة اختيار
         // الملف فعلياً عند استدعاء .click() برمجياً (خلل WebKit معروف: عناصر
         // display:none لا تستجيب لـ.click() المُستدعى من كود، رغم عملها في

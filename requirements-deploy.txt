@@ -19,5 +19,6 @@ pandas
 Pillow
 openpyxl
 python-docx
+python-pptx
 playwright
 slowapi

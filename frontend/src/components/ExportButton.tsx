@@ -42,7 +42,7 @@ export function ExportButton({ editor }: { editor: Editor | null }) {
         disabled={disabled}
         className="rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-white dark:text-zinc-900"
       >
-        {exportingFormat === "docx" ? "جارٍ التصدير..." : "تصدير Word"}
+        {exportingFormat === "docx" ? "Exporting..." : "Export Word"}
       </button>
       <button
         type="button"
@@ -50,7 +50,7 @@ export function ExportButton({ editor }: { editor: Editor | null }) {
         disabled={disabled}
         className="rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-white dark:hover:bg-zinc-800"
       >
-        {exportingFormat === "pdf" ? "جارٍ التصدير..." : "تصدير PDF"}
+        {exportingFormat === "pdf" ? "Exporting..." : "Export PDF"}
       </button>
     </div>
   );
