@@ -26,6 +26,8 @@ pdfplumber كما هي).
 from __future__ import annotations
 
 import base64
+import ctypes
+import ctypes.util
 import gc
 import json
 import logging
@@ -1672,6 +1674,44 @@ def _strip_repeated_page_headers(pages: List[Page]) -> None:
         page.blocks = _strip_header_prefix(page.blocks, first_page_texts)
 
 
+@lru_cache(maxsize=1)
+def _libc_with_malloc_trim() -> Optional[ctypes.CDLL]:
+    """يحمّل `libc` مرة واحدة فقط (glibc على Linux/Render) للوصول لـ`malloc_trim`.
+    يُعيد `None` بأمان على أي بيئة لا تملكها (macOS للتطوير المحلي مثلاً) — استدعاء
+    وحيد فاشل هنا لا يوقف الاستخراج، فقط يُعطِّل تحسين الذاكرة هذا تحديداً."""
+    lib_name = ctypes.util.find_library("c")
+    if not lib_name:
+        return None
+    try:
+        return ctypes.CDLL(lib_name)
+    except OSError:
+        return None
+
+
+def _release_freed_memory_to_os() -> None:
+    """يُجبر مخصِّص الذاكرة (`glibc malloc`) على إعادة الذاكرة التي حرّرها Python
+    فعلاً لنظام التشغيل، بدل إبقائها محجوزة داخلياً لإعادة استخدام محتمل لاحقاً.
+
+    **خلل حقيقي رُصِد فعلياً عبر Render (وليس نظرياً):** بعد إضافة البثّ الحقيقي
+    لكل صفحة (`on_page_ready`/`keep_full_result=False`، يُبقي ذروة الذاكرة **لصفحة
+    واحدة** فقط بدل المستند كاملاً)، ملف ~17MB حقيقي كثيف الصفحات ما زال يُسقط
+    الخادم — لكن سجلّات Render أظهرت أن الطلب اكتمل بنجاح فعلاً (`200 OK` مسجَّل
+    بعد ~8.5 دقيقة)، والانهيار حدث بعد ذلك بـ40 ثانية فقط أثناء إعادة التشغيل. يعني
+    `gc.collect()` كانت تحرّر كائنات Python فعلاً في كل صفحة (كما هو مُصمَّم)، لكن
+    `glibc` نفسها لا تُعيد تلك الصفحات المُحرَّرة لنظام التشغيل تلقائياً بين
+    التخصيصات الكبيرة المتكررة (numpy/opencv/Pillow/استجابات Vision JSON الضخمة) —
+    فتتراكم الذاكرة **المرصودة فعلياً من نظام التشغيل** (RSS) تصاعدياً عبر عشرات
+    الصفحات رغم تحرّرها منطقياً في Python، حتى تتجاوز حد 512MB الفعلي. `malloc_trim`
+    يجبر المخصِّص على إعادة الكتل الحرّة فعلياً بدل الاحتفاظ بها. لا علاقة له بجودة
+    الاستخراج إطلاقاً — فقط انضباط ذاكرة على مستوى النظام."""
+    libc = _libc_with_malloc_trim()
+    if libc is not None:
+        try:
+            libc.malloc_trim(0)
+        except Exception:
+            pass
+
+
 def extract_document(
     pdf_path: str,
     file_name: Optional[str] = None,
@@ -1784,6 +1824,11 @@ def extract_document(
                 # فوراً بدل تركها متراكمة حتى نهاية المستند كله على مستندات متعددة
                 # الصفحات، لتفادي بقاء ذروة الذاكرة مرتفعة طوال بقية الاستخراج.
                 gc.collect()
+                # يُعيد الذاكرة التي حرّرها `gc.collect()` للتو فعلياً لنظام التشغيل
+                # (انظر توثيق `_release_freed_memory_to_os` — تراكم RSS عبر glibc
+                # هو السبب الفعلي المؤكَّد لانهيار ملفات كبيرة حتى بعد البثّ الحقيقي
+                # لكل صفحة). لا فائدة تُذكَر بلا `gc.collect()` قبله مباشرة.
+                _release_freed_memory_to_os()
 
     fitz_doc.close()
     if keep_full_result:
