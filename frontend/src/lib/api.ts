@@ -150,7 +150,7 @@ export async function extractDocumentStream(
   throw new Error("انقطع الاتصال بخادم الاستخراج قبل اكتمال العملية");
 }
 
-export type ExportFormat = "docx" | "pdf";
+export type ExportFormat = "docx" | "pptx" | "pdf";
 
 export interface ExportImage {
   image_id: string;

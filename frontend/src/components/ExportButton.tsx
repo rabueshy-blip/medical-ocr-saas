@@ -14,11 +14,11 @@ export function ExportButton({ editor }: { editor: Editor | null }) {
     setExportingFormat(format);
     try {
       const baseName = (document?.file_name ?? "translated_document").replace(/\.pdf$/i, "");
-      const images = format === "docx" ? (document?.images ?? []) : [];
+      const images = format === "docx" || format === "pptx" ? (document?.images ?? []) : [];
       const blob = await exportFile(format, editor.getJSON(), baseName, images);
 
-      // مستند Word فيه صور يعود من الخادم كملف ZIP (Word + مجلد images/) بدل .docx
-      // مفرد — الامتداد يُحدَّد من نوع الاستجابة الفعلي، وليس من `format` وحده.
+      // مستند Word/PowerPoint فيه صور يعود من الخادم كملف ZIP (الملف + مجلد images/)
+      // بدل ملف مفرد — الامتداد يُحدَّد من نوع الاستجابة الفعلي، وليس من `format` وحده.
       const extension = blob.type === "application/zip" ? "zip" : format;
 
       const url = URL.createObjectURL(blob);
@@ -43,6 +43,14 @@ export function ExportButton({ editor }: { editor: Editor | null }) {
         className="rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-white dark:text-zinc-900"
       >
         {exportingFormat === "docx" ? "Exporting..." : "Export Word"}
+      </button>
+      <button
+        type="button"
+        onClick={() => handleExport("pptx")}
+        disabled={disabled}
+        className="rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-white dark:hover:bg-zinc-800"
+      >
+        {exportingFormat === "pptx" ? "Exporting..." : "Export PowerPoint"}
       </button>
       <button
         type="button"

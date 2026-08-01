@@ -18,7 +18,7 @@ from PIL import Image
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
-from .ingest import _sort_blocks_by_position
+from .ingest import _flatten_to_white_rgb, _sort_blocks_by_position
 from .schema import Block, BlockType, BoundingBox, Document, ImageAsset, Page, PageSource, SourceEngine
 
 
@@ -51,7 +51,7 @@ def _slide_blocks_and_images(slide, slide_number: int, images: List[ImageAsset])
         if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
             try:
                 png_buffer = BytesIO()
-                image = Image.open(BytesIO(shape.image.blob)).convert("RGB")
+                image = _flatten_to_white_rgb(Image.open(BytesIO(shape.image.blob)))
                 image.save(png_buffer, format="PNG")
             except Exception:
                 continue  # صورة تالفة/ترميز غير مدعوم — تفشل صورة واحدة، لا الشريحة كلها

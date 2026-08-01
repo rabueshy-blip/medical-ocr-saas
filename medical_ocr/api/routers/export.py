@@ -1,7 +1,8 @@
-"""تصدير محتوى المحرر (JSON من TipTap، بعد تحرير المترجم) إلى Word حقيقي أو PDF —
-جداول كجداول حقيقية وليست نصاً مسطَّحاً. الصور **لا** تُضمَّن كبيانات حقيقية داخل Word
-(انظر `_add_image`) — تُستبدَل بـplaceholder نصي، وتُسلَّم الصورة الفعلية في مجلد
-`images/` ضمن ZIP عند وجود صور (`export_docx`).
+"""تصدير محتوى المحرر (JSON من TipTap، بعد تحرير المترجم) إلى Word/PowerPoint حقيقيَّين
+أو PDF — جداول كجداول حقيقية وليست نصاً مسطَّحاً. الصور **لا** تُضمَّن كبيانات حقيقية
+داخل Word/PowerPoint (انظر `_add_image`) — تُستبدَل بـplaceholder نصي، وتُسلَّم الصورة
+الفعلية في مجلد `images/` ضمن ZIP عند وجود صور (`_stream_with_optional_images`، تُستخدَم
+من `export_docx` و`export_pptx` معاً).
 
 يقبل المحتوى المُحرَّر من الواجهة مباشرة (وليس Document الأصلي من extract-document) عمداً:
 الهدف تصدير النتيجة *بعد* ترجمة/تعديل المترجم، لا النص الخام المُستخرَج.
@@ -24,6 +25,8 @@ from docx import Document as DocxDocument
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from playwright.sync_api import sync_playwright
+from pptx import Presentation
+from pptx.util import Inches
 from pydantic import BaseModel, Field
 
 from ..rate_limit import limiter
@@ -123,6 +126,131 @@ def _add_image(doc: DocxDocument, node: dict) -> None:
     doc.add_paragraph(f"[Insert {image_id or 'Image'} here]")
 
 
+def _add_pptx_table(prs: Presentation, node: dict) -> None:
+    """جدول PowerPoint حقيقي على شريحة مستقلة خاصة به (نفس منطق دمج colspan لـ`_add_table`
+    لكن عبر `cell.merge()` الخاصة بجداول python-pptx بدل python-docx) — جدول وفقرات نص
+    ممتزجان في نفس الشريحة يصيران غير مقروءَين بصرياً بسرعة، فكل جدول يأخذ شريحة فارغة
+    (`slide_layouts[6]`) بلا عنوان يتنافس معه على المساحة."""
+    row_nodes = node.get("content", [])
+    if not row_nodes:
+        return
+    num_cols = max(
+        (
+            sum(int(cell_node.get("attrs", {}).get("colspan", 1)) for cell_node in row_node.get("content", []))
+            for row_node in row_nodes
+        ),
+        default=0,
+    )
+    if num_cols == 0:
+        return
+
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    left, top = Inches(0.4), Inches(0.4)
+    width, height = prs.slide_width - Inches(0.8), prs.slide_height - Inches(0.8)
+    table = slide.shapes.add_table(len(row_nodes), num_cols, left, top, width, height).table
+
+    for row_index, row_node in enumerate(row_nodes):
+        col_cursor = 0
+        for cell_node in row_node.get("content", []):
+            if col_cursor >= num_cols:
+                break
+            colspan = int(cell_node.get("attrs", {}).get("colspan", 1))
+            colspan = max(1, min(colspan, num_cols - col_cursor))
+            table.cell(row_index, col_cursor).text = _extract_text(cell_node)
+            if colspan > 1:
+                table.cell(row_index, col_cursor).merge(table.cell(row_index, col_cursor + colspan - 1))
+            col_cursor += colspan
+
+
+def _build_pptx(top_content: List[dict]) -> bytes:
+    """يحوّل نفس محتوى TipTap المستخدَم في `export_docx` إلى عرض PowerPoint: كل
+    عنوان (heading) يبدأ شريحة جديدة (تخطيط "Title and Content")، والفقرات
+    التالية تتراكم كنقاط في مساحة المحتوى لنفس الشريحة حتى العنوان التالي أو
+    الجدول التالي. الجدول يأخذ شريحته المستقلة دوماً (انظر `_add_pptx_table`).
+    الصور بنفس اتفاقية `_add_image`: placeholder نصي فقط، لا تضمين حقيقي.
+
+    **قيد معروف مقبول:** خلافاً لـWord/PDF، الشريحة لا "تفيض" تلقائياً لشريحة
+    تالية عند نص طويل جداً — تجاوز عملي غير محلول هنا، الشرائح الفعلية لهذا
+    المشروع (تقارير طبية قصيرة الفقرات) لم تُظهر هذه المشكلة عملياً."""
+    prs = Presentation()
+    current_body = None
+
+    def start_slide(title: str) -> None:
+        nonlocal current_body
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        slide.shapes.title.text = title
+        current_body = slide.placeholders[1].text_frame
+        current_body.clear()
+
+    def append_text(text: str) -> None:
+        nonlocal current_body
+        if current_body is None:
+            start_slide("")
+        if len(current_body.paragraphs) == 1 and not current_body.paragraphs[0].text:
+            current_body.paragraphs[0].text = text
+        else:
+            current_body.add_paragraph().text = text
+
+    for node in top_content:
+        node_type = node.get("type")
+        try:
+            if node_type == "heading":
+                start_slide(_extract_text(node))
+            elif node_type == "paragraph":
+                text = _extract_text(node)
+                if text:
+                    append_text(text)
+            elif node_type == "table":
+                _add_pptx_table(prs, node)
+                current_body = None  # الجدول شريحة مستقلة؛ الفقرة التالية تبدأ شريحة نص جديدة
+            elif node_type == "image":
+                image_id = node.get("attrs", {}).get("imageId")
+                append_text(f"[Insert {image_id or 'Image'} here]")
+        except Exception as exc:  # عنصر واحد فاشل لا يوقف تصدير بقية العرض
+            logger.warning("تعذّر تصدير عنصر PowerPoint من نوع %s: %s", node_type, exc)
+
+    if len(prs.slides) == 0:
+        start_slide("")
+
+    buffer = io.BytesIO()
+    prs.save(buffer)
+    return buffer.getvalue()
+
+
+def _stream_with_optional_images(
+    primary_bytes: bytes,
+    primary_extension: str,
+    primary_media_type: str,
+    safe_name: str,
+    images: List[ExportImage],
+) -> StreamingResponse:
+    """يُرجع الملف الأساسي (.docx/.pptx) مباشرة إن لم توجد صور، أو ZIP واحد (الملف +
+    مجلد `images/`) عند وجودها — نفس منطق `export_docx` الأصلي، مُستخرَج هنا كي
+    يُشارَك مع `export_pptx` بدل تكراره."""
+    if not images:
+        return StreamingResponse(
+            io.BytesIO(primary_bytes),
+            media_type=primary_media_type,
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}.{primary_extension}"'},
+        )
+
+    # مستند فيه صور: يُسلَّم ZIP واحد (الملف + مجلد images/) بدل ملف مفرد، كي يجد
+    # المترجم/فريق DTP الصور التي تشير إليها الـplaceholders النصية داخل الملف بسهولة.
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+        zip_file.writestr(f"{safe_name}.{primary_extension}", primary_bytes)
+        for image in images:
+            extension = image.mime_type.rsplit("/", maxsplit=1)[-1] or "png"
+            zip_file.writestr(f"images/{image.image_id}.{extension}", base64.b64decode(image.data_base64))
+    zip_buffer.seek(0)
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}.zip"'},
+    )
+
+
 @router.post("/export-docx")
 @limiter.limit("20/minute")
 def export_docx(request: Request, payload: ExportRequest) -> StreamingResponse:
@@ -145,31 +273,33 @@ def export_docx(request: Request, payload: ExportRequest) -> StreamingResponse:
 
     docx_buffer = io.BytesIO()
     doc.save(docx_buffer)
-    docx_buffer.seek(0)
 
     safe_name = _safe_file_name(payload.file_name)
+    return _stream_with_optional_images(
+        docx_buffer.getvalue(),
+        "docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        safe_name,
+        payload.images,
+    )
 
-    if not payload.images:
-        return StreamingResponse(
-            docx_buffer,
-            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={"Content-Disposition": f'attachment; filename="{safe_name}.docx"'},
-        )
 
-    # مستند فيه صور: يُسلَّم ZIP واحد (Word + مجلد images/) بدل ملف .docx مفرد، كي يجد
-    # المترجم/فريق DTP الصور التي تشير إليها الـplaceholders النصية داخل Word بسهولة.
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zip_file:
-        zip_file.writestr(f"{safe_name}.docx", docx_buffer.getvalue())
-        for image in payload.images:
-            extension = image.mime_type.rsplit("/", maxsplit=1)[-1] or "png"
-            zip_file.writestr(f"images/{image.image_id}.{extension}", base64.b64decode(image.data_base64))
-    zip_buffer.seek(0)
+@router.post("/export-pptx")
+@limiter.limit("20/minute")
+def export_pptx(request: Request, payload: ExportRequest) -> StreamingResponse:
+    top_content = payload.content.get("content", [])
+    if not top_content:
+        raise HTTPException(status_code=422, detail="المستند فارغ، لا يوجد محتوى للتصدير")
 
-    return StreamingResponse(
-        zip_buffer,
-        media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{safe_name}.zip"'},
+    pptx_bytes = _build_pptx(top_content)
+
+    safe_name = _safe_file_name(payload.file_name)
+    return _stream_with_optional_images(
+        pptx_bytes,
+        "pptx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        safe_name,
+        payload.images,
     )
 
 

@@ -471,6 +471,23 @@ def _table_blocks(pdfplumber_page) -> List[Block]:
     return blocks
 
 
+def _flatten_to_white_rgb(image: Image.Image) -> Image.Image:
+    """يحوّل أي صورة (بصرف النظر عن نمطها الأصلي) إلى RGB بخلفية بيضاء صريحة.
+
+    `Image.convert("RGB")` مباشرة على صورة فيها قناة شفافية (RGBA/LA/P بشفافية)
+    **لا يركّب على خلفية بيضاء** — يُسقِط قناة alpha فقط ويُبقي قيم RGB الخام
+    تحتها كما هي، وهذه غالباً (0,0,0) أسود في شعارات/رسوم PDF بخلفية شفافة
+    (soft mask)، فتظهر خلفية سوداء كاملة في الصورة المُصدَّرة بدل الشفافية
+    الأصلية (بينما خلفية الصفحة الفعلية بيضاء). التركيب الصريح هنا على أبيض
+    يطابق ما يراه المستخدم فعلياً بدل خلفية سوداء عشوائية."""
+    if image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info):
+        image = image.convert("RGBA")
+        background = Image.new("RGB", image.size, (255, 255, 255))
+        background.paste(image, mask=image.split()[-1])
+        return background
+    return image.convert("RGB")
+
+
 def _page_images(
     fitz_doc: fitz.Document, fitz_page: fitz.Page, page_number: int, seen_xrefs: Set[int]
 ) -> List[ImageAsset]:
@@ -492,7 +509,7 @@ def _page_images(
         try:
             extracted = fitz_doc.extract_image(xref)
             png_buffer = BytesIO()
-            Image.open(BytesIO(extracted["image"])).convert("RGB").save(png_buffer, format="PNG")
+            _flatten_to_white_rgb(Image.open(BytesIO(extracted["image"]))).save(png_buffer, format="PNG")
             png_bytes = png_buffer.getvalue()
         except Exception as exc:
             logger.warning("تعذّر استخراج الصورة xref=%d من الصفحة %d: %s", xref, page_number, exc)
