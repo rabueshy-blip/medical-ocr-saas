@@ -75,6 +75,19 @@ _VISION_TIMEOUT_MAX_SECONDS = 90
 _VISION_MAX_IMAGE_BYTES = 4 * 1024 * 1024
 _VISION_MIN_JPEG_QUALITY = 40
 
+# **خلل حقيقي مُشخَّص فعلياً عبر سجلّات ذاكرة Render (ليس نظرياً):** صورة PDF
+# مُضمَّنة واحدة بدقة بكسل ضخمة جداً (سُجِّل فعلياً: ملف ~17MB حقيقي بـ3 صفحات فقط،
+# انهار السيرفر أثناء معالجة الصفحة الأولى **قبل اكتمالها** — لا علاقة له بتراكم
+# عبر عدة صفحات كما افتُرض ابتدائياً) تكفي وحدها لتجاوز حد ذاكرة الخادم (512MB)
+# عند فك ترميزها الكامل — خصوصاً بعد إضافة تركيب SMask/RGBA (`_page_images`) التي
+# تُبقي عدة نسخ كاملة الدقة حيّة في آنٍ واحد (الصورة الخام + قناع الشفافية +
+# نسخة RGBA مدمجة + نسخة نهائية مُسطَّحة على الأبيض). الحد هنا يُقلِّص أي صورة
+# مُضمَّنة أكبر من هذا قبل تلك السلسلة كاملةً، فتُبقي كل تلك النسخ صغيرة الحجم
+# بصرف النظر عن الدقة الأصلية. **لا علاقة له بجودة استخراج النص/OCR إطلاقاً** —
+# يخص فقط دقة الصورة الفرعية المُستخرَجة (مكتبة الوسائط/التصدير)، و3000px على
+# الضلع الأطول أعلى بكثير من أي استخدام عملي (عرض/طباعة/CAT tools).
+_MAX_EMBEDDED_IMAGE_DIMENSION = 3000
+
 # اكتشاف جداول الصفحات الممسوحة هندسياً (`_detect_scanned_table_regions`): أي تسلسل
 # من أسطر متتالية له هذا الحد الأدنى من الأسطر/الخلايا يُعتبر "منطقة جدول" مرشَّحة.
 # **جُرِّب رفعه إلى 3 لاستبعاد أزواج حقول الترويسة/التذييل الوهمية (NAME/FILE NO،
@@ -491,6 +504,18 @@ def _flatten_to_white_rgb(image: Image.Image) -> Image.Image:
     return image.convert("RGB")
 
 
+def _downscale_if_huge(image: Image.Image, max_dimension: int = _MAX_EMBEDDED_IMAGE_DIMENSION) -> Image.Image:
+    """يُقلِّص أي صورة أكبر من `max_dimension` على ضلعها الأطول قبل أي معالجة لاحقة
+    (تركيب SMask/تسطيح/إعادة ترميز) — انظر توثيق `_MAX_EMBEDDED_IMAGE_DIMENSION`
+    للسبب الفعلي المؤكَّد عبر سجلّات إنتاج حقيقية. لا تأثير على الصور العادية
+    (الأغلبية الساحقة أصلاً أصغر من الحد)."""
+    if max(image.size) <= max_dimension:
+        return image
+    scale = max_dimension / max(image.size)
+    new_size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+    return image.resize(new_size, Image.LANCZOS)
+
+
 def _page_images(
     fitz_doc: fitz.Document, fitz_page: fitz.Page, page_number: int, seen_xrefs: Set[int]
 ) -> List[ImageAsset]:
@@ -511,7 +536,7 @@ def _page_images(
         seen_xrefs.add(xref)
         try:
             extracted = fitz_doc.extract_image(xref)
-            base_image = Image.open(BytesIO(extracted["image"]))
+            base_image = _downscale_if_huge(Image.open(BytesIO(extracted["image"])))
 
             # **خلل حقيقي مُشخَّص فعلياً (ليس نظرياً):** `extract_image` يُرجع صورة
             # PDF المرجعية بشفافية (`/SMask` — الطريقة الشائعة لحفظ الشفافية في PDF،
