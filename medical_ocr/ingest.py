@@ -536,7 +536,12 @@ def _page_images(
         seen_xrefs.add(xref)
         try:
             extracted = fitz_doc.extract_image(xref)
-            base_image = _downscale_if_huge(Image.open(BytesIO(extracted["image"])))
+            opened = Image.open(BytesIO(extracted["image"]))
+            logger.info(
+                "الصفحة %d: صورة مُضمَّنة xref=%d، أبعاد أصلية=%dx%d، بايتات مضغوطة=%d",
+                page_number, xref, opened.width, opened.height, len(extracted["image"]),
+            )
+            base_image = _downscale_if_huge(opened)
 
             # **خلل حقيقي مُشخَّص فعلياً (ليس نظرياً):** `extract_image` يُرجع صورة
             # PDF المرجعية بشفافية (`/SMask` — الطريقة الشائعة لحفظ الشفافية في PDF،
@@ -1633,6 +1638,10 @@ def _scanned_page_blocks_vision(
     نفس PNG الصفحة الكاملة مرتين، عبء ذاكرة/CPU مضاعف بلا فائدة على أي صفحة
     ممسوحة — أثره الأكبر تحديداً على صفحات كتب كثيفة الصور مثل مونتاجات الأشكال)."""
     pixmap = page.get_pixmap(dpi=dpi)
+    logger.info(
+        "صفحة ممسوحة %d: بيتماب مُرستَر=%dx%d بكسل (dpi=%d)، حجم خام تقريبي=%.1f MB",
+        page_number, pixmap.width, pixmap.height, dpi, pixmap.samples_mv.nbytes / (1024 * 1024),
+    )
     image_bytes = _compress_image_to_limit(pixmap.tobytes("png"))
     pixmap = None  # حرّر بيتماب PyMuPDF الخام الآن، قبل انتظار استجابة الشبكة
 
@@ -1810,6 +1819,14 @@ def extract_document(
             logger.info("بدء معالجة الصفحة %d/%d", index + 1, fitz_doc.page_count)
             fitz_page = fitz_doc[index]
             digital_text = fitz_page.get_text("text").strip()
+            logger.info(
+                "الصفحة %d: نص رقمي=%d حرف، أبعاد MediaBox=%.0fx%.0f pt، عدد الصور المُضمَّنة=%d",
+                index + 1,
+                len(digital_text),
+                fitz_page.rect.width,
+                fitz_page.rect.height,
+                len(fitz_page.get_images(full=True)),
+            )
 
             if len(digital_text) >= MIN_DIGITAL_CHARS:
                 table_blocks = _table_blocks(plumber_doc.pages[index])
