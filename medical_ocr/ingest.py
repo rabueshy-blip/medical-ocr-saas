@@ -508,8 +508,30 @@ def _page_images(
         seen_xrefs.add(xref)
         try:
             extracted = fitz_doc.extract_image(xref)
+            base_image = Image.open(BytesIO(extracted["image"]))
+
+            # **خلل حقيقي مُشخَّص فعلياً (ليس نظرياً):** `extract_image` يُرجع صورة
+            # PDF المرجعية بشفافية (`/SMask` — الطريقة الشائعة لحفظ الشفافية في PDF،
+            # خلافاً لـPNG بقناة alpha مضمَّنة مباشرة) كصورة RGB **معتمة بالفعل**، بقيم
+            # RGB خام مطبوعة تحت المناطق الشفافة (غالباً أسود) — قناة الشفافية نفسها
+            # مخزَّنة في xref منفصل تماماً (`extracted["smask"]`). `_flatten_to_white_rgb`
+            # وحدها لا تكفي هنا لأن الصورة تصل إليها بلا قناة alpha من الأساس (`mode="RGB"`
+            # سلفاً) — تحقّق فعلي: صورة PDF شفافة حقيقية عبر `page.insert_image` أعادت
+            # `extracted["smask"]` xref صحيحاً ووضع مركزها بلون الخلفية الأصلي (أسود) بدل
+            # أبيض دون هذا الدمج. الحل: استخراج xref القناع كصورة رمادية منفصلة وتركيبها
+            # كقناة alpha قبل التسطيح على الأبيض.
+            smask_xref = extracted.get("smask")
+            if smask_xref:
+                mask_extracted = fitz_doc.extract_image(smask_xref)
+                mask_image = Image.open(BytesIO(mask_extracted["image"])).convert("L")
+                if mask_image.size != base_image.size:
+                    mask_image = mask_image.resize(base_image.size)
+                base_image = base_image.convert("RGBA")
+                base_image.putalpha(mask_image)
+                seen_xrefs.add(smask_xref)
+
             png_buffer = BytesIO()
-            _flatten_to_white_rgb(Image.open(BytesIO(extracted["image"]))).save(png_buffer, format="PNG")
+            _flatten_to_white_rgb(base_image).save(png_buffer, format="PNG")
             png_bytes = png_buffer.getvalue()
         except Exception as exc:
             logger.warning("تعذّر استخراج الصورة xref=%d من الصفحة %d: %s", xref, page_number, exc)
