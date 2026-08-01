@@ -87,15 +87,28 @@ async def extract_pptx_endpoint(request: Request, file: UploadFile = File(...)) 
 @limiter.limit("20/minute")
 async def extract_document_stream_endpoint(request: Request, file: UploadFile = File(...)) -> StreamingResponse:
     """نسخة Server-Sent Events من `/extract-document` — نفس الاستخراج بالضبط، لكن
-    تبثّ حدث تقدّم (`{"type": "progress", "page": N, "total": M}`) بعد كل صفحة
-    منجزة، ثم حدثاً أخيراً واحداً (`{"type": "done", "document": {...}}`) يحمل
-    المستند الكامل. **السبب:** مستند 30 صفحة ممسوحة (حد الخطة المجانية) قِيس فعلياً
-    بحوالي 157 ثانية (استدعاء Vision API حقيقي متسلسل لكل صفحة) — طلب HTTP عادي
-    واحد يُبقي المستخدم بلا أي تغذية راجعة طوال هذه المدة، فتبدو الواجهة "عالقة"
-    رغم أنها تعمل فعلياً. `extract_document` نفسها تبقى متزامنة (blocking) — تُشغَّل
-    هنا في executor thread منفصل، والاستدعاء المرجعي (`on_page_done`) يُمرِّر كل
-    تحديث لحلقة الأحداث بأمان عبر `call_soon_threadsafe` (الاستدعاء يصل من thread
-    مختلف عن الحلقة نفسها)."""
+    تبثّ حدث تقدّم (`{"type": "progress", "page": N, "total": M}`) **وحدث بيانات كامل
+    لكل صفحة فور جهوزيتها** (`{"type": "page", "page": {...}, "images": [...]}`)، ثم
+    حدثاً أخيراً `{"type": "done"}` بلا أي حمولة (كل المحتوى وصل فعلاً عبر أحداث
+    "page" السابقة).
+
+    **بثّ حقيقي للبيانات، وليس تقدّماً رقمياً فقط (تصحيح مهم):** النسخة السابقة كانت
+    تبثّ فقط رقم الصفحة/الإجمالي أثناء المعالجة، ثم تُرسل **المستند الكامل** (كل
+    النصوص + كل الصور base64) دفعة واحدة في حدث "done" الأخير — يعني الخادم كان يبقي
+    كل صفحات/صور المستند مُجمَّعة في الذاكرة طوال الطلب رغم البثّ الظاهري، فذروة
+    الذاكرة تتناسب مع حجم المستند **كاملاً** بصرف النظر عن كونه streaming. رُصِد فعلياً
+    عبر Render أن ملفاً ~17MB كثيف الصور يُسقط الخادم بتجاوز حد الذاكرة (512MB على
+    الخطة المجانية) رغم تحسين ذاكرة الصفحة الواحدة (`_flatten_to_white_rgb`/تقليل فك
+    الترميز المكرر). الحل: `extract_document(..., on_page_ready=..., keep_full_result=False)`
+    يبثّ كل صفحة فور اكتمالها **ولا يُبقيها** في قوائم الخادم الداخلية — فذروة الذاكرة
+    تصير بحجم صفحة واحدة تقريباً بدل المستند كاملاً، بصرف النظر عن عدد الصفحات/الصور
+    الكلي. لا تغيير إطلاقاً في منطق OCR/الاستخراج نفسه — فقط توقيت إرسال/الاحتفاظ
+    بالبيانات.
+
+    `extract_document` نفسها تبقى متزامنة (blocking) — تُشغَّل هنا في executor thread
+    منفصل، والاستدعاءان المرجعيان (`on_page_done`/`on_page_ready`) يُمرِّران كل تحديث
+    لحلقة الأحداث بأمان عبر `call_soon_threadsafe` (الاستدعاء يصل من thread مختلف عن
+    الحلقة نفسها)."""
     if not (file.filename or "").lower().endswith(".pdf"):
         raise HTTPException(status_code=422, detail="الملف المرفوع يجب أن يكون بصيغة PDF")
 
@@ -116,12 +129,26 @@ async def extract_document_stream_endpoint(request: Request, file: UploadFile = 
         def on_page_done(page: int, total: int) -> None:
             loop.call_soon_threadsafe(queue.put_nowait, {"type": "progress", "page": page, "total": total})
 
+        def on_page_ready(page, page_images) -> None:
+            loop.call_soon_threadsafe(
+                queue.put_nowait,
+                {
+                    "type": "page",
+                    "page": page.model_dump(mode="json"),
+                    "images": [image.model_dump(mode="json") for image in page_images],
+                },
+            )
+
         def run_extraction() -> None:
             try:
-                document = extract_document(tmp_path, file_name=original_file_name, on_page_done=on_page_done)
-                loop.call_soon_threadsafe(
-                    queue.put_nowait, {"type": "done", "document": document.model_dump(mode="json")}
+                extract_document(
+                    tmp_path,
+                    file_name=original_file_name,
+                    on_page_done=on_page_done,
+                    on_page_ready=on_page_ready,
+                    keep_full_result=False,
                 )
+                loop.call_soon_threadsafe(queue.put_nowait, {"type": "done"})
             except Exception as exc:  # ملف تالف/ليس PDF فعلياً رغم الامتداد، إلخ
                 logger.warning("فشل استخراج المستند (بثّ) %s: %s", original_file_name, exc)
                 loop.call_soon_threadsafe(queue.put_nowait, {"type": "error", "message": str(exc)})

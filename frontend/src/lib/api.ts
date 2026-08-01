@@ -95,7 +95,15 @@ export async function extractPptx(file: File): Promise<Document> {
  * تستدعي `onProgress` بعد كل صفحة منجزة أثناء الانتظار. مستند 30 صفحة ممسوحة (حد
  * الخطة المجانية) يستغرق فعلياً ~2.5 دقيقة (استدعاء Vision API حقيقي متسلسل لكل
  * صفحة) — بلا هذا التقدّم، الواجهة تبقى شاشة تحميل صامتة تبدو "عالقة" طوال المدة.
- * axios لا يدعم قراءة SSE قطعة-بقطعة بسهولة هنا، فنستخدم `fetch` مباشرة. */
+ * axios لا يدعم قراءة SSE قطعة-بقطعة بسهولة هنا، فنستخدم `fetch` مباشرة.
+ *
+ * **بثّ حقيقي للبيانات (تصحيح ذاكرة على الخادم):** كانت هذه الدالة تنتظر حدث "done"
+ * الوحيد الذي يحمل المستند كاملاً — يعني الخادم كان يُبقي كل صفحات/صور المستند
+ * مُجمَّعة في ذاكرته طوال الطلب رغم البثّ الظاهري (رُصِد فعلياً أن ملفاً ~17MB كثيف
+ * الصور يُسقط خادم Render بتجاوز حد الذاكرة 512MB). الآن كل صفحة تصل عبر حدث "page"
+ * منفصل فور اكتمالها في الخادم، فيُسقطها الخادم من ذاكرته فوراً بعد إرسالها بدل
+ * الاحتفاظ بها حتى النهاية — التجميع النهائي في مستند واحد يحدث هنا في المتصفح بدلاً
+ * من الخادم، لأن ذاكرة المتصفح ليست القيد الفعلي (خلاف حاوية Render الصغيرة). */
 export async function extractDocumentStream(
   file: File,
   onProgress: (page: number, total: number) => void,
@@ -121,6 +129,8 @@ export async function extractDocumentStream(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  const pages: Page[] = [];
+  const images: ImageAsset[] = [];
 
   while (true) {
     const { done, value } = await reader.read();
@@ -139,8 +149,11 @@ export async function extractDocumentStream(
 
       if (payload.type === "progress") {
         onProgress(payload.page, payload.total);
+      } else if (payload.type === "page") {
+        pages.push(payload.page as Page);
+        images.push(...(payload.images as ImageAsset[]));
       } else if (payload.type === "done") {
-        return payload.document as Document;
+        return { file_name: file.name, pages, images };
       } else if (payload.type === "error") {
         throw new Error(payload.message || "تعذّر استخراج المستند");
       }

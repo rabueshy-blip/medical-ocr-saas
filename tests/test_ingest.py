@@ -105,6 +105,87 @@ class TestExtractDocument(unittest.TestCase):
 
             self.assertEqual(calls, [(1, 3), (2, 3), (3, 3)])
 
+    def test_on_page_ready_streams_full_page_content_as_pages_complete(self):
+        # /extract-document-stream يعتمد على هذا لبثّ كل صفحة فور جهوزيتها بدل تجميع
+        # المستند كاملاً في الذاكرة ثم إرساله دفعة واحدة في النهاية (خلل ذاكرة حقيقي
+        # على ملفات كبيرة، رُصِد فعلياً عبر Render: "Ran out of memory (used over
+        # 512MB)"). on_page_ready يجب أن يستلم محتوى الصفحة كاملاً (blocks حقيقية)
+        # فور اكتمالها، وليس فقط رقمها.
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pdf_path = os.path.join(tmp_dir, "multi.pdf")
+            doc = fitz.open()
+            for i in range(3):
+                page = doc.new_page()
+                page.insert_text((72, 72), f"Page {i + 1} content")
+            doc.save(pdf_path)
+            doc.close()
+
+            streamed = []
+            extract_document(
+                pdf_path,
+                on_page_ready=lambda page, images: streamed.append((page.page_number, page.blocks, images)),
+            )
+
+            self.assertEqual([p for p, _, _ in streamed], [1, 2, 3])
+            for _, blocks, _ in streamed:
+                self.assertTrue(blocks)
+
+    def test_keep_full_result_false_returns_lightweight_document_and_streams_instead(self):
+        # keep_full_result=False (وضع البثّ الحقيقي) يجب ألا يُبقي أي محتوى في القوائم
+        # الكلية المُرجَعة — الهدف الأساسي هو عدم بقاء الصفحات محمَّلة في ذاكرة الخادم
+        # بعد بثّها، وإلا تذوب فائدة تقليل الذاكرة بالكامل.
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pdf_path = os.path.join(tmp_dir, "multi.pdf")
+            doc = fitz.open()
+            for i in range(3):
+                page = doc.new_page()
+                page.insert_text((72, 72), f"Page {i + 1} content")
+            doc.save(pdf_path)
+            doc.close()
+
+            streamed_page_numbers = []
+            result = extract_document(
+                pdf_path,
+                on_page_ready=lambda page, images: streamed_page_numbers.append(page.page_number),
+                keep_full_result=False,
+            )
+
+            self.assertEqual(streamed_page_numbers, [1, 2, 3])
+            self.assertEqual(len(result.pages), 3)
+            self.assertTrue(all(page.blocks == [] for page in result.pages))
+            self.assertEqual(result.images, [])
+
+    def test_streaming_mode_strips_repeated_header_same_as_normal_mode(self):
+        # _strip_repeated_page_headers الأصلية تعمل كتمريرة واحدة بعد اكتمال كل
+        # الصفحات — في وضع البثّ (keep_full_result=False) لا تُستدعى تلك التمريرة
+        # إطلاقاً (الصفحات هياكل خفيفة فارغة)، فيجب أن يُطبَّق نفس منطق حذف الترويسة
+        # المكررة inline أثناء الحلقة نفسها، بنفس النتيجة تماماً كالمسار العادي.
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pdf_path = os.path.join(tmp_dir, "header.pdf")
+            doc = fitz.open()
+            for i in range(2):
+                page = doc.new_page()
+                page.insert_text((72, 72), "HOSPITAL HEADER LINE")
+                page.insert_text((72, 90), f"Distinct content for page {i + 1}")
+            doc.save(pdf_path)
+            doc.close()
+
+            normal_result = extract_document(pdf_path)
+
+            streamed_blocks = []
+            extract_document(
+                pdf_path,
+                on_page_ready=lambda page, images: streamed_blocks.append(page.blocks),
+                keep_full_result=False,
+            )
+
+            normal_texts = [[b.text for b in page.blocks] for page in normal_result.pages]
+            streamed_texts = [[b.text for b in blocks] for blocks in streamed_blocks]
+            self.assertEqual(normal_texts, streamed_texts)
+            # الترويسة المكررة يجب أن تختفي من الصفحة الثانية فقط، لا الأولى
+            self.assertIn("HOSPITAL HEADER LINE", normal_texts[0])
+            self.assertNotIn("HOSPITAL HEADER LINE", normal_texts[1])
+
     def test_digital_page_extracts_real_grid_table_via_pdfplumber(self):
         rows = [["Drug", "Dose"], ["Metformin", "500mg"], ["Aspirin", "100mg"]]
         with tempfile.TemporaryDirectory() as tmp_dir:

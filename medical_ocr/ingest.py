@@ -1638,6 +1638,22 @@ def _normalize_header_text(text: str) -> str:
     return " ".join(text.split()).strip().lower()
 
 
+def _strip_header_prefix(blocks: List[Block], first_page_texts: List[Optional[str]]) -> List[Block]:
+    """منطق المطابقة الفعلي وراء `_strip_repeated_page_headers` لصفحة واحدة — مُستخرَج
+    كي يُستخدَم أيضاً inline في وضع البثّ الحقيقي لـ`extract_document` (حين
+    `keep_full_result=False` لا تمر الصفحات بمعالجة لاحقة بعد اكتمال الحلقة، فالتعرّف
+    على الترويسة المكررة يجب أن يحدث للصفحة الواحدة فور جهوزيتها، مقارنةً بنص الصفحة
+    الأولى المحفوظ مسبقاً)."""
+    match_count = 0
+    for block, first_text in zip(blocks, first_page_texts):
+        if block.text is None or first_text is None:
+            break
+        if _normalize_header_text(block.text) != first_text:
+            break
+        match_count += 1
+    return blocks[match_count:] if match_count else blocks
+
+
 def _strip_repeated_page_headers(pages: List[Page]) -> None:
     """يحذف الترويسة المكررة (شعار/اسم المستشفى، عنوان التقرير) من بداية كل صفحة بعد
     الأولى إن كانت مطابقة نصياً لبداية الصفحة الأولى — يُبقي أثراً واحداً فقط في
@@ -1653,21 +1669,15 @@ def _strip_repeated_page_headers(pages: List[Page]) -> None:
     ]
 
     for page in pages[1:]:
-        match_count = 0
-        for block, first_text in zip(page.blocks, first_page_texts):
-            if block.text is None or first_text is None:
-                break
-            if _normalize_header_text(block.text) != first_text:
-                break
-            match_count += 1
-        if match_count:
-            page.blocks = page.blocks[match_count:]
+        page.blocks = _strip_header_prefix(page.blocks, first_page_texts)
 
 
 def extract_document(
     pdf_path: str,
     file_name: Optional[str] = None,
     on_page_done: Optional[Callable[[int, int], None]] = None,
+    on_page_ready: Optional[Callable[[Page, List[ImageAsset]], None]] = None,
+    keep_full_result: bool = True,
 ) -> Document:
     """يفتح ملف PDF كاملاً ويحوّله إلى Document: نص رقمي عبر PyMuPDF + جداول pdfplumber
     للصفحات التي تحتوي طبقة نص، وOCR عبر Google Vision API (raster لكامل الصفحة) للصفحات
@@ -1682,11 +1692,29 @@ def extract_document(
     مستند 30 صفحة ممسوحة (الحد الأقصى للخطة المجانية) قِيس فعلياً بحوالي 157 ثانية
     (~5.2s/صفحة، استدعاء Vision API حقيقي متسلسل لكل صفحة، بلا أي تغذية راجعة أثناء
     الانتظار) — الواجهة تحتاج معرفة تقدّم حقيقي لكل صفحة بدل شاشة تحميل صامتة تبدو
-    وكأنها عَلِقت. لا يُغيّر أي سلوك حالي عند تركه `None` (الافتراضي)."""
+    وكأنها عَلِقت. لا يُغيّر أي سلوك حالي عند تركه `None` (الافتراضي).
+
+    `on_page_ready`/`keep_full_result` (بثّ حقيقي لتوفير الذاكرة على مستندات ثقيلة
+    الصور): طلب مستخدم مباشر بعد رصد فعلي عبر Render أن ملفاً كبيراً (~17MB، صفحات
+    ممسوحة كثيفة الصور) يُسقط الخادم بتجاوز حد الذاكرة (512MB على الخطة المجانية) —
+    حتى بعد تقليل الذاكرة داخل الصفحة الواحدة، النقطة `/extract-document-stream` كانت
+    لا تزال تُبقي **كل** صفحات/صور المستند مجمَّعة في `pages`/`images` طوال الطلب،
+    وترسلها دفعة واحدة في حدث "done" الأخير فقط — البثّ كان تجميلياً (تقدّم رقمي فقط)
+    بلا أي أثر فعلي على ذروة الذاكرة. حين يُمرَّر `on_page_ready`، يُستدعى بكل صفحة
+    (Page + صورها) فور جهوزيتها، فيستطيع المستدعي (`/extract-document-stream`) بثّها
+    فوراً للعميل. `keep_full_result=False` (تستخدمه فقط تلك النقطة) يمنع أيضاً إضافة
+    الصفحة/صورها لقوائم `pages`/`images` الكلية بعد بثّها — بدونه تبقى الفائدة صفراً
+    (الصفحات تُرسَل تباعاً لكن تبقى محمَّلة في ذاكرة الخادم حتى نهاية الطلب كاملاً).
+    المُرجَع النهائي حين `keep_full_result=False` هيكل خفيف فقط (صفحات بلا blocks، بلا
+    صور) — لا يُستخدَم فعلياً من ذلك المستدعي لأن كل المحتوى وصل فعلاً عبر
+    `on_page_ready`. الافتراضي (`True`) يبقي السلوك الحالي كاملاً بلا أي تغيير
+    (`/extract-document` العادية وكل الاستخدامات الأخرى)."""
     fitz_doc = fitz.open(pdf_path)
     pages: List[Page] = []
     images: List[ImageAsset] = []
     seen_image_xrefs: Set[int] = set()
+    image_counter = 0
+    first_page_texts: Optional[List[Optional[str]]] = None
 
     with pdfplumber.open(pdf_path) as plumber_doc:
         for index in range(fitz_doc.page_count):
@@ -1700,12 +1728,7 @@ def extract_document(
                 ]
                 blocks = _digital_page_blocks(fitz_page, exclude_bboxes=table_bboxes) + table_blocks
                 source = PageSource.DIGITAL
-
                 page_images = _page_images(fitz_doc, fitz_page, index + 1, seen_image_xrefs)
-                for image in page_images:
-                    images.append(image)
-                    image.image_id = f"Image_{len(images):02d}"
-                blocks = _insert_image_placeholders(blocks, page_images)
             else:
                 source = PageSource.SCANNED
                 try:
@@ -1724,12 +1747,34 @@ def extract_document(
                     ]
                     page_images = []
 
-                for image in page_images:
-                    images.append(image)
-                    image.image_id = f"Image_{len(images):02d}"
-                blocks = _insert_image_placeholders(blocks, page_images)
+            for image in page_images:
+                image_counter += 1
+                image.image_id = f"Image_{image_counter:02d}"
+            blocks = _insert_image_placeholders(blocks, page_images)
 
-            pages.append(Page(page_number=index + 1, source=source, blocks=blocks))
+            if not keep_full_result:
+                # وضع البثّ: لا معالجة لاحقة بعد الحلقة (`_strip_repeated_page_headers`
+                # لن تُستدعى لأن `pages` هنا هياكل خفيفة فقط) — فتُطبَّق مقارنة الترويسة
+                # المكررة هنا فور جهوزية كل صفحة، بنفس منطق `_strip_header_prefix`
+                # بالضبط، بدلاً من تمريرة واحدة على كل الصفحات في النهاية.
+                if index == 0:
+                    first_page_texts = [
+                        _normalize_header_text(b.text) if b.text is not None else None for b in blocks
+                    ]
+                elif first_page_texts is not None:
+                    blocks = _strip_header_prefix(blocks, first_page_texts)
+
+            page = Page(page_number=index + 1, source=source, blocks=blocks)
+
+            if on_page_ready is not None:
+                on_page_ready(page, page_images)
+
+            if keep_full_result:
+                pages.append(page)
+                images.extend(page_images)
+            else:
+                pages.append(Page(page_number=index + 1, source=source, blocks=[]))
+
             if on_page_done is not None:
                 on_page_done(index + 1, fitz_doc.page_count)
 
@@ -1741,5 +1786,6 @@ def extract_document(
                 gc.collect()
 
     fitz_doc.close()
-    _strip_repeated_page_headers(pages)
+    if keep_full_result:
+        _strip_repeated_page_headers(pages)
     return Document(file_name=file_name or pdf_path, pages=pages, images=images)
