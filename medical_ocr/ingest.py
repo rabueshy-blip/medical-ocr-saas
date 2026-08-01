@@ -26,6 +26,7 @@ pdfplumber كما هي).
 from __future__ import annotations
 
 import base64
+import gc
 import json
 import logging
 import os
@@ -1185,7 +1186,7 @@ def _drop_oversized_line_components(mask: "np.ndarray", max_span_ratio: float, a
     return cleaned
 
 
-def _ruled_line_masks(image_bytes: bytes) -> Optional[tuple]:
+def _ruled_line_masks(image_bytes: bytes, gray: Optional["np.ndarray"] = None) -> Optional[tuple]:
     """يستخرج قناعَي الخطوط الأفقية/الرأسية المرسومة فعلياً في صورة صفحة ممسوحة عبر
     عمليات مورفولوجية (erode بعنصر بنيوي واسع أفقياً/رأسياً يعزل الخطوط الطويلة فقط،
     ثم dilate لاستعادة سمكها) — يكتشف استمارات/جداول معلومات حدودها مرسومة فعلياً،
@@ -1194,11 +1195,18 @@ def _ruled_line_masks(image_bytes: bytes) -> Optional[tuple]:
     هامش حواف الصورة يُصفَّر أولاً، وقطاعات الخط الطويلة جداً (ظل/انحناء تصوير عند
     حواف الصفحة، وليست جزءاً من أي جدول — لوحظ فعلياً: خطان رأسيان بطول الصفحة كاملاً
     من حافتَي صورة مصوَّرة بالهاتف) تُستبعَد عبر `_drop_oversized_line_components`.
-    يُعيد None إن تعذّر فك ترميز الصورة (تدهور آمن، لا يوقف الاستخراج)."""
-    try:
-        gray = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_GRAYSCALE)
-    except Exception:
-        return None
+    يُعيد None إن تعذّر فك ترميز الصورة (تدهور آمن، لا يوقف الاستخراج).
+
+    `gray` (اختياري، لتوفير الذاكرة): صفحة ممسوحة واحدة كانت تُفكّ ترميزها هنا
+    وفي `_detect_scanned_photo_regions` بشكل منفصل تماماً (فك ترميز PNG كاملاً
+    مرتين لكل صفحة، عبء ذاكرة/CPU مضاعف بلا فائدة). المستدعي (`_scanned_page_blocks_vision`)
+    يفكّها مرة واحدة ويمررها هنا — الاستدعاء المباشر بلا `gray` (كما في الاختبارات)
+    يبقى يعمل بالضبط كما كان، يفكّها داخلياً بنفسه."""
+    if gray is None:
+        try:
+            gray = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_GRAYSCALE)
+        except Exception:
+            return None
     if gray is None:
         return None
 
@@ -1283,7 +1291,9 @@ def _assign_words_to_grid(words: List[dict], row_bounds: List[int], col_bounds: 
     return grid
 
 
-def _detect_ruled_table_regions(image_bytes: bytes, words: List[dict]) -> List[dict]:
+def _detect_ruled_table_regions(
+    image_bytes: bytes, words: List[dict], gray: Optional["np.ndarray"] = None
+) -> List[dict]:
     """يكتشف جداول بخطوط شبكة مرسومة فعلياً (استمارات/جداول معلومات مريض حدودها
     مرسومة على الصفحة الممسوحة نفسها — مثال: حقول Patient ID/Name/DOB في استمارة
     أشعة/تحويل) عبر معالجة صورة (OpenCV)، خلافاً لـ`_detect_scanned_table_regions`
@@ -1300,7 +1310,7 @@ def _detect_ruled_table_regions(image_bytes: bytes, words: List[dict]) -> List[d
     إحالة) لا تُعتبر جدول بيانات حقيقياً — رغم صحة الخط نفسه هندسياً. تُرفَض المنطقة
     كاملةً فتتدفّق كلماتها كفقرات نص عادية بدل خلية جدول واحدة تُفجِّر التنسيق عند
     التصدير. انظر توثيق `_RULED_TABLE_MAX_CELL_CHARS` للقياس الفعلي."""
-    masks = _ruled_line_masks(image_bytes)
+    masks = _ruled_line_masks(image_bytes, gray=gray)
     if masks is None:
         return []
     h_lines, v_lines = masks
@@ -1337,7 +1347,9 @@ def _detect_ruled_table_regions(image_bytes: bytes, words: List[dict]) -> List[d
     return regions
 
 
-def _scanned_table_blocks(image_bytes: bytes, words: List[dict]) -> List[Block]:
+def _scanned_table_blocks(
+    image_bytes: bytes, words: List[dict], gray: Optional["np.ndarray"] = None
+) -> List[Block]:
     """يبني Block(TABLE) لكل منطقة جدول مُكتشَفة، من مصدرين مستقلَّين:
 
     1. جداول بخطوط شبكة مرسومة فعلياً (`_detect_ruled_table_regions`) — تُعتبر
@@ -1350,7 +1362,7 @@ def _scanned_table_blocks(image_bytes: bytes, words: List[dict]) -> List[Block]:
     `raw_rows` تبقى دوماً الشبكة الخام قبل أي تصحيح (أثر تدقيق/audit trail)."""
     blocks: List[Block] = []
 
-    ruled_regions = _detect_ruled_table_regions(image_bytes, words)
+    ruled_regions = _detect_ruled_table_regions(image_bytes, words, gray=gray)
     ruled_bboxes = []
     for region in ruled_regions:
         bbox = region["bbox"]
@@ -1390,7 +1402,9 @@ def _scanned_table_blocks(image_bytes: bytes, words: List[dict]) -> List[Block]:
     return blocks
 
 
-def _detect_scanned_photo_regions(image_bytes: bytes, words: List[dict]) -> List[BoundingBox]:
+def _detect_scanned_photo_regions(
+    image_bytes: bytes, words: List[dict], gray: Optional["np.ndarray"] = None
+) -> List[BoundingBox]:
     """يكتشف صوراً/أشكالاً حقيقية (رسوم توضيحية، أشعة، صور سريرية) داخل صفحة ممسوحة
     بيتماب واحد بلا كائنات PDF صور منفصلة (خلاف `_page_images` للصفحات الرقمية،
     التي تستخرج كائنات صور مضمَّنة فعلياً) — عبر عتبة تباين خام فقط، بلا أي إغلاق أو
@@ -1400,8 +1414,13 @@ def _detect_scanned_photo_regions(image_bytes: bytes, words: List[dict]) -> List
     يُميَّز "الصورة الحقيقية" عن "نص/صندوق نص ملوَّن" عبر نسبة تغطية كلمات Vision
     المكتشَفة داخل حدود كل مكوّن (`_SCANNED_IMAGE_MAX_TEXT_COVERAGE_RATIO`) — صورة
     حقيقية قد تحوي تسمية قصيرة جداً (حرف واحد "A"/"B") لكن لا تُغطّى بكلمات نصياً
-    بأي قدر معتبر، خلافاً لفقرة أو صندوق نص."""
-    gray = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_GRAYSCALE)
+    بأي قدر معتبر، خلافاً لفقرة أو صندوق نص.
+
+    `gray` (اختياري، لتوفير الذاكرة): نفس مبدأ `_ruled_line_masks` — إن مرَّره
+    المستدعي (`_scanned_page_blocks_vision`) يُتفادى فك ترميز PNG الصفحة كاملةً
+    مرة ثانية بعد فكّه أصلاً لاكتشاف الجداول المرسومة."""
+    if gray is None:
+        gray = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_GRAYSCALE)
     if gray is None:
         return []
     height, width = gray.shape
@@ -1537,30 +1556,42 @@ def _scanned_page_blocks_vision(
     اكتشاف الصور/الأشكال (جديد): `_detect_scanned_photo_regions` يكتشف صوراً حقيقية
     داخل بيتماب الصفحة نفسه (خلاف `_page_images` للصفحات الرقمية) وتُستبعَد كلماتها/
     فقراتها من التدفّق النصي العادي بنفس مبدأ استبعاد خلايا الجدول. يُعيد الآن tuple
-    (blocks, images) بدل List[Block] فقط — انظر موقع الاستدعاء في `extract_document`."""
+    (blocks, images) بدل List[Block] فقط — انظر موقع الاستدعاء في `extract_document`.
+
+    **توفير ذاكرة (صفحات كثيفة الأشكال):** `pixmap` الخام (بيتماب PyMuPDF غير
+    المضغوط، أثقل عنصر في هذه الدالة) يُحرَّر فوراً بعد استخراج بايتات PNG منه،
+    قبل استدعاء شبكة Vision API — لا حاجة له بعدها. كذلك تُفكّ صورة الصفحة إلى
+    مصفوفة رمادية (`gray`) **مرة واحدة فقط** وتُمرَّر لكل من اكتشاف الجداول
+    المرسومة واكتشاف الصور/الأشكال بدل أن يفكّها كل منهما بشكل مستقل (كانا يفكّان
+    نفس PNG الصفحة الكاملة مرتين، عبء ذاكرة/CPU مضاعف بلا فائدة على أي صفحة
+    ممسوحة — أثره الأكبر تحديداً على صفحات كتب كثيفة الصور مثل مونتاجات الأشكال)."""
     pixmap = page.get_pixmap(dpi=dpi)
     image_bytes = _compress_image_to_limit(pixmap.tobytes("png"))
+    pixmap = None  # حرّر بيتماب PyMuPDF الخام الآن، قبل انتظار استجابة الشبكة
 
     vision_response = _call_vision_api(image_bytes)
     full_text_annotation = vision_response.get("fullTextAnnotation")
     if not full_text_annotation or not full_text_annotation.get("pages"):
         return [], []
 
+    gray = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_GRAYSCALE)
+
     blocks: List[Block] = []
     images: List[ImageAsset] = []
     for vision_page in full_text_annotation["pages"]:
         words = _vision_word_boxes(vision_page)
-        photo_regions = _detect_scanned_photo_regions(image_bytes, words)
+        photo_regions = _detect_scanned_photo_regions(image_bytes, words, gray=gray)
         photo_bboxes = [(r.x0, r.y0, r.x1, r.y1) for r in photo_regions]
         remaining_words = [
             w for w in words if not _bbox_center_in_any((w["x0"], w["top"], w["x1"], w["bottom"]), photo_bboxes)
         ]
 
-        table_blocks = _scanned_table_blocks(image_bytes, remaining_words)
+        table_blocks = _scanned_table_blocks(image_bytes, remaining_words, gray=gray)
         table_bboxes = [(b.bbox.x0, b.bbox.y0, b.bbox.x1, b.bbox.y1) for b in table_blocks if b.bbox]
         paragraph_blocks = _blocks_from_vision_page(vision_page, exclude_bboxes=table_bboxes + photo_bboxes)
         blocks.extend(_sort_blocks_by_position(paragraph_blocks + table_blocks))
         images.extend(_scanned_photo_images(image_bytes, photo_regions, page_number))
+    del gray
     return blocks, images
 
 
@@ -1662,6 +1693,13 @@ def extract_document(
             pages.append(Page(page_number=index + 1, source=source, blocks=blocks))
             if on_page_done is not None:
                 on_page_done(index + 1, fitz_doc.page_count)
+
+            if source == PageSource.SCANNED:
+                # صفحة ممسوحة تستخدم opencv/numpy/Pillow لبيتماب صفحة كامل (وأحياناً
+                # عدة قصّات صور فرعية إضافية على صفحات كثيفة الأشكال) — تُجمَع مخلّفاتها
+                # فوراً بدل تركها متراكمة حتى نهاية المستند كله على مستندات متعددة
+                # الصفحات، لتفادي بقاء ذروة الذاكرة مرتفعة طوال بقية الاستخراج.
+                gc.collect()
 
     fitz_doc.close()
     _strip_repeated_page_headers(pages)
