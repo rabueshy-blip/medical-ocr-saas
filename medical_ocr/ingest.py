@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import random
+import resource
 import statistics
 import time
 from functools import lru_cache
@@ -1712,6 +1713,29 @@ def _release_freed_memory_to_os() -> None:
             pass
 
 
+def _log_peak_memory(stage: str) -> None:
+    """يسجّل ذروة RSS التراكمية للعملية (منذ بدايتها، وليس لحظياً) — تشخيص مؤقت
+    مُضاف بعد أن 3 محاولات إصلاح متتالية (بثّ حقيقي لكل صفحة، `malloc_trim`، تنظيف
+    غير مقصور على الصفحات الممسوحة) لم توقف انهيار ملف مستخدم حقيقي ~17MB. الفارق
+    الزمني بين تسجيل "200 OK" والانهيار في Uvicorn كان ~40 ثانية **ثابتاً** في كل
+    محاولة (رُصِد فعلياً: 41s ثم 40s ثم 42s) بصرف النظر عن نوع/حجم الملف الفعلي —
+    هذا يوحي بأن `200 OK` يُسجَّل عند **بدء** البثّ لا اكتماله (Uvicorn يسجّل عند
+    إرسال ترويسات الاستجابة)، يعني كل محاولة انهارت فعلياً في منتصف المعالجة
+    الحقيقية بعد ~40 ثانية، وليس بعد اكتمال ناجح كما بدا سابقاً — يرجّح صفحة واحدة
+    ثقيلة جداً بذاتها (صورة عالية الدقة غالباً) بدل تراكم عبر عدة صفحات (الذي
+    استهدفته الإصلاحات الثلاثة السابقة دون جدوى). هذا السجلّ يكشف بالضبط أي صفحة
+    كانت قيد المعالجة عند الانهيار القادم (إن حدث) بدل التخمين مرة رابعة."""
+    try:
+        # ru_maxrss بوحدة KB على Linux (بيئة الإنتاج فعلياً) لكن بوحدة bytes على
+        # macOS — القسمة هنا صحيحة لـLinux فقط، الأرقام أثناء التطوير المحلي على
+        # macOS ستكون مُسمّاة "MB" خطأً (فعلياً KB) — غير مهم، هذا التشخيص يُقرَأ من
+        # سجلّات Render (Linux) لا محلياً.
+        peak_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        logger.info("ذروة RSS التراكمية بعد %s: %.1f MB", stage, peak_kb / 1024)
+    except Exception:
+        pass
+
+
 def extract_document(
     pdf_path: str,
     file_name: Optional[str] = None,
@@ -1758,6 +1782,7 @@ def extract_document(
 
     with pdfplumber.open(pdf_path) as plumber_doc:
         for index in range(fitz_doc.page_count):
+            logger.info("بدء معالجة الصفحة %d/%d", index + 1, fitz_doc.page_count)
             fitz_page = fitz_doc[index]
             digital_text = fitz_page.get_text("text").strip()
 
@@ -1830,6 +1855,7 @@ def extract_document(
             # `gc.collect()` لا بدلاً عنها).
             gc.collect()
             _release_freed_memory_to_os()
+            _log_peak_memory(f"الصفحة {index + 1}/{fitz_doc.page_count} (مصدر={source.value}, صور={len(page_images)})")
 
     fitz_doc.close()
     if keep_full_result:
