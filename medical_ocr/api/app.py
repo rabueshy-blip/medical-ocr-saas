@@ -27,6 +27,14 @@ from .rate_limit import limiter
 from .routers import documents, export, spelling, tables
 from .schemas import HealthResponse
 
+# **خلل حقيقي مُشخَّص (لا علاقة له بـPYTHONUNBUFFERED رغم تشابه العرض):** بلا
+# `basicConfig` هنا، مستوى logger الجذري الافتراضي في Python هو WARNING — أي
+# استدعاء `logger.info(...)` في أي مكان بالمشروع (بما فيها سجلّات تشخيص الذاكرة
+# لكل صفحة في `ingest.py`) يُسقَط بصمت عند مستوى الإطار نفسه، قبل أن تصل لـstdout
+# أصلاً بصرف النظر عن الـbuffering. تحقّق فعلي: حتى بعد `PYTHONUNBUFFERED=1` لم
+# تظهر أي سجلّات تشخيص في Render إطلاقاً — السبب هذا، وليس التخزين المؤقت.
+logging.basicConfig(level=logging.INFO)
+
 logger = logging.getLogger(__name__)
 
 
