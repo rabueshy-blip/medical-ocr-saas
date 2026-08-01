@@ -88,6 +88,21 @@ _VISION_MIN_JPEG_QUALITY = 40
 # الضلع الأطول أعلى بكثير من أي استخدام عملي (عرض/طباعة/CAT tools).
 _MAX_EMBEDDED_IMAGE_DIMENSION = 3000
 
+# **السبب الجذري الفعلي المؤكَّد أخيراً (عبر سجلّات تشخيص دقيقة، بعد استبعاد فرضيتين
+# سابقتين — تراكم عبر الصفحات، وصورة PDF مُضمَّنة ضخمة):** الحد أعلاه
+# (`_MAX_EMBEDDED_IMAGE_DIMENSION`) لم يُغيّر شيئاً لأن الصفحة المُسبِّبة للانهيار
+# الحقيقي أصلاً **ممسوحة** (0 حرف نص رقمي)، لا رقمية بصورة مُضمَّنة. السجلّ الحاسم:
+# `MediaBox=1939x2849 pt` (صفحة فعلياً بحجم فيزيائي ~3.4 ضعف الحجم القياسي، تقريباً
+# حجم ملصق) → رسترتها بـdpi=200 الثابت أنتجت بيتماب `5388x7915` بكسل = **122MB خام**
+# لوحدها فقط، قبل أي معالجة لاحقة (ترميز PNG، فك رمادي لاكتشاف الجداول، استجابة
+# Vision JSON) — هذا وحده كافٍ لتجاوز حد الخادم 512MB. الحل: DPI **تكيّفي** يُبقي
+# أطول ضلع للبيتماب الناتج تحت هذا الحد بصرف النظر عن الحجم الفيزيائي للصفحة —
+# صفحة عادية (~612×792pt) عند dpi=200 تُنتج أصلاً ~1700×2339px (أقل من الحد بكثير،
+# **لا تأثير إطلاقاً** على الغالبية الساحقة من المستندات الحقيقية)، فقط الصفحات
+# الفيزيائية الضخمة استثنائياً تُخفَّض دقتها تناسبياً. 4000px أعلى من أي احتياج فعلي
+# لدقة OCR جيدة (توصية Google Vision نفسها لا تتجاوز هذا النطاق عملياً).
+_MAX_SCANNED_RASTER_DIMENSION_PX = 4000
+
 # اكتشاف جداول الصفحات الممسوحة هندسياً (`_detect_scanned_table_regions`): أي تسلسل
 # من أسطر متتالية له هذا الحد الأدنى من الأسطر/الخلايا يُعتبر "منطقة جدول" مرشَّحة.
 # **جُرِّب رفعه إلى 3 لاستبعاد أزواج حقول الترويسة/التذييل الوهمية (NAME/FILE NO،
@@ -1611,6 +1626,21 @@ def _blocks_from_vision_page(vision_page: dict, exclude_bboxes: Optional[List[tu
     return blocks
 
 
+def _effective_scan_dpi(page: fitz.Page, requested_dpi: int) -> int:
+    """يُخفِّض DPI الطلب فقط إن كان الحجم الفيزيائي للصفحة (`page.rect`، بالنقاط)
+    سيُنتِج بيتماباً أطول ضلعاً من `_MAX_SCANNED_RASTER_DIMENSION_PX` عند هذا الـDPI —
+    انظر توثيق الثابت لسبب الحاجة الفعلية المؤكَّدة لهذا (صفحة بحجم ملصق ~1939×2849pt
+    أنتجت بيتماب 122MB عند dpi=200 الثابت). صفحة بحجم عادي تبقى دون الحد أصلاً
+    فيُعاد نفس `requested_dpi` بلا أي تغيير."""
+    longest_side_pt = max(page.rect.width, page.rect.height)
+    if longest_side_pt <= 0:
+        return requested_dpi
+    projected_px = longest_side_pt * requested_dpi / 72
+    if projected_px <= _MAX_SCANNED_RASTER_DIMENSION_PX:
+        return requested_dpi
+    return max(1, int(_MAX_SCANNED_RASTER_DIMENSION_PX * 72 / longest_side_pt))
+
+
 def _scanned_page_blocks_vision(
     page: fitz.Page, page_number: int = 1, dpi: int = 200
 ) -> tuple:
@@ -1637,10 +1667,11 @@ def _scanned_page_blocks_vision(
     المرسومة واكتشاف الصور/الأشكال بدل أن يفكّها كل منهما بشكل مستقل (كانا يفكّان
     نفس PNG الصفحة الكاملة مرتين، عبء ذاكرة/CPU مضاعف بلا فائدة على أي صفحة
     ممسوحة — أثره الأكبر تحديداً على صفحات كتب كثيفة الصور مثل مونتاجات الأشكال)."""
-    pixmap = page.get_pixmap(dpi=dpi)
+    effective_dpi = _effective_scan_dpi(page, dpi)
+    pixmap = page.get_pixmap(dpi=effective_dpi)
     logger.info(
-        "صفحة ممسوحة %d: بيتماب مُرستَر=%dx%d بكسل (dpi=%d)، حجم خام تقريبي=%.1f MB",
-        page_number, pixmap.width, pixmap.height, dpi, pixmap.samples_mv.nbytes / (1024 * 1024),
+        "صفحة ممسوحة %d: بيتماب مُرستَر=%dx%d بكسل (dpi مطلوب=%d، dpi فعلي=%d)، حجم خام تقريبي=%.1f MB",
+        page_number, pixmap.width, pixmap.height, dpi, effective_dpi, pixmap.samples_mv.nbytes / (1024 * 1024),
     )
     image_bytes = _compress_image_to_limit(pixmap.tobytes("png"))
     pixmap = None  # حرّر بيتماب PyMuPDF الخام الآن، قبل انتظار استجابة الشبكة
