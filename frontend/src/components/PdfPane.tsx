@@ -85,7 +85,7 @@ export function PdfPane({ file }: { file: File }) {
   };
 
   return (
-    <div className="flex h-full flex-col bg-zinc-100 dark:bg-zinc-900">
+    <div className="flex h-full min-h-0 flex-col bg-zinc-100 dark:bg-zinc-900">
       <Worker workerUrl="/pdf.worker.min.js">
         <div className="flex items-center gap-3 border-b border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-800 dark:bg-zinc-950">
           <GoToPreviousPage />
@@ -99,7 +99,7 @@ export function PdfPane({ file }: { file: File }) {
             <ZoomIn />
           </span>
         </div>
-        <div className="flex-1 overflow-hidden">
+        <div className="min-h-0 flex-1 overflow-hidden">
           {fileUrl && (
             <Viewer
               fileUrl={fileUrl}
