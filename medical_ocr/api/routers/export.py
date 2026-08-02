@@ -372,6 +372,40 @@ def export_pptx(request: Request, payload: ExportRequest) -> StreamingResponse:
     )
 
 
+# نفس سقف Word (150 DPI × 5.5 إنش) لكن هنا يُطبَّق فعلياً على أبعاد البكسل قبل
+# التضمين، وليس فقط عرض عرض CSS — الفرق مهم: صورة مسحوبة بحجمها الأصلي (لوحظ حتى
+# 1512×1378px لكل صورة، 9 صور في مستند واحد) تُجبر Chromium على فك وترسيم كل تلك
+# البكسلات فعلياً رغم أن CSS `max-width:100%` يعرضها أصغر بصرياً فقط — على حاوية
+# Render المجانية (512MB، وعملية الاستخراج نفسها لوحظت تصل لذروة RSS ~360MB لنفس
+# الملف) هذا كان يُسقط/يُعلِّق Playwright فعلياً (طلب حقيقي بقي معلَّقاً على الإنتاج
+# لأكثر من دقيقتين بلا استجابة على ملف حقيقي 8 صفحات/9 صور، بينما نفس التصدير محلياً
+# استغرق أقل من 15 ثانية) — تصغير أبعاد البكسل الفعلية قبل الترسيم هو الإصلاح الجذري.
+_PDF_EMBEDDED_IMAGE_MAX_WIDTH_PX = 825
+
+
+def _resize_image_data_url(src: str) -> str:
+    """يُصغِّر صورة data URL إلى `_PDF_EMBEDDED_IMAGE_MAX_WIDTH_PX` كحد أقصى قبل
+    تمريرها لـChromium عبر Playwright — يُرجع `src` كما هو دون تعديل لأي صورة أصغر
+    من الحد أصلاً، أو لأي src غير قابل للفك (تدهور آمن، نفس نمط `_decode_data_url`)."""
+    image_bytes = _decode_data_url(src)
+    if image_bytes is None:
+        return src
+    try:
+        with PILImage.open(io.BytesIO(image_bytes)) as pil_image:
+            if pil_image.width <= _PDF_EMBEDDED_IMAGE_MAX_WIDTH_PX:
+                return src
+            ratio = _PDF_EMBEDDED_IMAGE_MAX_WIDTH_PX / pil_image.width
+            resized = pil_image.resize(
+                (_PDF_EMBEDDED_IMAGE_MAX_WIDTH_PX, max(1, round(pil_image.height * ratio))),
+                PILImage.LANCZOS,
+            )
+            buffer = io.BytesIO()
+            resized.save(buffer, format="PNG")
+            return f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode('ascii')}"
+    except Exception:
+        return src
+
+
 def _node_to_html(node: dict) -> str:
     node_type = node.get("type")
     if node_type == "text":
@@ -397,7 +431,9 @@ def _node_to_html(node: dict) -> str:
         return f"<table>{''.join(rows_html)}</table>"
     if node_type == "image":
         src = node.get("attrs", {}).get("src", "")
-        return f'<img src="{html.escape(src)}" />' if src else ""
+        if not src:
+            return ""
+        return f'<img src="{html.escape(_resize_image_data_url(src))}" />'
     return ""
 
 

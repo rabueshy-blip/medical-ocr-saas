@@ -182,7 +182,10 @@ export async function exportFile(
   const response = await apiClient.post(
     `/export-${format}`,
     { content, file_name: fileName, images },
-    { responseType: "blob" },
+    // مهلة 90 ثانية: بلا هذا axios ينتظر إلى ما لا نهاية إن تعطّل الخادم بصمت (تعطّل
+    // OOM حقيقي مُلاحَظ فعلياً على Render مع صور كبيرة قبل إصلاح تصغير الصور في
+    // export.py) — الآن أي تعليق حقيقي يظهر كخطأ واضح بدل دوران لانهائي على الزر.
+    { responseType: "blob", timeout: 90000 },
   );
   return response.data;
 }
