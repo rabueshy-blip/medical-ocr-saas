@@ -1525,7 +1525,12 @@ def _detect_scanned_photo_regions(
             continue
         if area < _SCANNED_IMAGE_MIN_AREA_PX:
             continue
-        if w >= width * _SCANNED_IMAGE_MAX_PAGE_SPAN_RATIO and h >= height * _SCANNED_IMAGE_MAX_PAGE_SPAN_RATIO:
+        # `or` وليس `and`: مكوّن يمتد شبه كامل عرض الصفحة لكن بارتفاع أقل قليلاً من
+        # الحد (لوحظ فعلياً: 100% عرض × 85.5% ارتفاع على مسح منخفض الجودة) كان يفلت
+        # من الاستبعاد ويُستخرَج كـ"صورة" ضخمة (~8MB) تُفجِّر الذاكرة على Render —
+        # أي بُعد شبه كامل وحده كافٍ ليكون "التحام كاذب عبر حافة اللقطة"، لا حاجة
+        # لكلا البُعدين معاً.
+        if w >= width * _SCANNED_IMAGE_MAX_PAGE_SPAN_RATIO or h >= height * _SCANNED_IMAGE_MAX_PAGE_SPAN_RATIO:
             continue
 
         x0, y0, x1, y1 = int(x), int(y), int(x + w), int(y + h)
