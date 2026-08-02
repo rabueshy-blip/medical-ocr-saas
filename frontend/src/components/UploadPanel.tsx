@@ -102,7 +102,7 @@ export function UploadPanel() {
           <img
             src="/extracted-images-feature.jpg"
             alt="New feature: extracted images are now included in your downloaded file"
-            className="w-full max-w-[96px] rounded-lg sm:max-w-[120px]"
+            className="w-full max-w-[96px] rounded-lg sm:max-w-[240px]"
           />
         </div>
       </div>
