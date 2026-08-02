@@ -2,16 +2,45 @@
 
 import { useState } from "react";
 import type { Editor } from "@tiptap/react";
+import { isAxiosError } from "axios";
 import { exportFile, type ExportFormat } from "@/lib/api";
 import { useDocumentStore } from "@/store/useDocumentStore";
+
+/** يستخرج رسالة خطأ مقروءة من فشل axios عند `responseType: "blob"` — في هذه الحالة
+ * `error.response.data` نفسه Blob (حتى لو الخادم أرجع JSON فعلياً)، فلا يكفي قراءته
+ * مباشرة كنص. بلا هذا، أي فشل تصدير (401/429/500/انقطاع اتصال) كان يُسقَط بصمت في
+ * `finally` فقط، فيبدو للمستخدم أن الزر "لا يعمل" رغم أن الطلب فشل فعلياً. */
+async function extractErrorMessage(err: unknown): Promise<string> {
+  if (isAxiosError(err)) {
+    if (err.response?.data instanceof Blob) {
+      try {
+        const text = await err.response.data.text();
+        const parsed = JSON.parse(text);
+        if (typeof parsed.detail === "string") return parsed.detail;
+      } catch {
+        // ليس JSON قابلاً للتحليل — نتابع للرسالة العامة أدناه.
+      }
+    }
+    if (err.response?.status === 429) {
+      return "عدد كبير جداً من الطلبات خلال وقت قصير — حاول مرة أخرى بعد دقيقة.";
+    }
+    if (err.response?.status) {
+      return `تعذّر التصدير (HTTP ${err.response.status})`;
+    }
+    return "تعذّر الاتصال بخادم التصدير — تحقّق من اتصالك بالإنترنت وحاول مرة أخرى.";
+  }
+  return err instanceof Error ? err.message : "تعذّر تصدير الملف";
+}
 
 export function ExportButton({ editor }: { editor: Editor | null }) {
   const document = useDocumentStore((state) => state.document);
   const [exportingFormat, setExportingFormat] = useState<ExportFormat | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   async function handleExport(format: ExportFormat) {
     if (!editor) return;
     setExportingFormat(format);
+    setErrorMessage(null);
     try {
       const baseName = (document?.file_name ?? "translated_document").replace(/\.pdf$/i, "");
       const images = format === "docx" || format === "pptx" ? (document?.images ?? []) : [];
@@ -27,6 +56,8 @@ export function ExportButton({ editor }: { editor: Editor | null }) {
       link.download = `${baseName}.${extension}`;
       link.click();
       URL.revokeObjectURL(url);
+    } catch (err) {
+      setErrorMessage(await extractErrorMessage(err));
     } finally {
       setExportingFormat(null);
     }
@@ -35,31 +66,36 @@ export function ExportButton({ editor }: { editor: Editor | null }) {
   const disabled = !editor || exportingFormat !== null;
 
   return (
-    <div className="flex items-center gap-2">
-      <button
-        type="button"
-        onClick={() => handleExport("docx")}
-        disabled={disabled}
-        className="rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-white dark:text-zinc-900"
-      >
-        {exportingFormat === "docx" ? "Exporting..." : "Export Word"}
-      </button>
-      <button
-        type="button"
-        onClick={() => handleExport("pptx")}
-        disabled={disabled}
-        className="rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-white dark:hover:bg-zinc-800"
-      >
-        {exportingFormat === "pptx" ? "Exporting..." : "Export PowerPoint"}
-      </button>
-      <button
-        type="button"
-        onClick={() => handleExport("pdf")}
-        disabled={disabled}
-        className="rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-white dark:hover:bg-zinc-800"
-      >
-        {exportingFormat === "pdf" ? "Exporting..." : "Export PDF"}
-      </button>
+    <div className="flex flex-col items-end gap-1">
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => handleExport("docx")}
+          disabled={disabled}
+          className="rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-white dark:text-zinc-900"
+        >
+          {exportingFormat === "docx" ? "Exporting..." : "Export Word"}
+        </button>
+        <button
+          type="button"
+          onClick={() => handleExport("pptx")}
+          disabled={disabled}
+          className="rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-white dark:hover:bg-zinc-800"
+        >
+          {exportingFormat === "pptx" ? "Exporting..." : "Export PowerPoint"}
+        </button>
+        <button
+          type="button"
+          onClick={() => handleExport("pdf")}
+          disabled={disabled}
+          className="rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-white dark:hover:bg-zinc-800"
+        >
+          {exportingFormat === "pdf" ? "Exporting..." : "Export PDF"}
+        </button>
+      </div>
+      {errorMessage && (
+        <p className="max-w-xs text-right text-xs text-red-600">{errorMessage}</p>
+      )}
     </div>
   );
 }
