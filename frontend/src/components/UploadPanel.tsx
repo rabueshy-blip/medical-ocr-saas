@@ -70,8 +70,8 @@ export function UploadPanel() {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">
         <p className="max-w-md text-zinc-700 dark:text-zinc-300">
-          لقد وصلت إلى الحد الأقصى للخطة المجانية (30 صفحة). للاستمرار في استخدام
-          الخدمة، تواصل معنا عبر واتساب للاشتراك.
+          لقد وصلت إلى الحد الأقصى للخطة المجانية ({FREE_PAGE_LIMIT} صفحة). للاستمرار في
+          استخدام الخدمة، تواصل معنا عبر واتساب للاشتراك.
         </p>
         <a
           href={`https://wa.me/${WHATSAPP_NUMBER}`}
@@ -102,7 +102,7 @@ export function UploadPanel() {
           <img
             src="/extracted-images-feature.jpg"
             alt="New feature: extracted images are now included in your downloaded file"
-            className="w-full max-w-sm rounded-lg sm:max-w-[240px]"
+            className="w-full max-w-[96px] rounded-lg sm:max-w-[60px]"
           />
         </div>
       </div>
@@ -119,14 +119,15 @@ export function UploadPanel() {
           ? progress
             ? `Extracting... (${progress.page}/${progress.total})`
             : "Extracting..."
-          : "Try free (Up to 30 pages)"}
+          : `Try free (Up to ${FREE_PAGE_LIMIT} pages)`}
       </button>
       {status !== "uploading" && (
-        // ملاحظة وقائية تحت الزر: 30 صفحة الحد المُختبَر فعلياً كموثوق (قياس حقيقي)،
-        // بينما ملف 38 صفحة حقيقي فشل فعلاً على الإنتاج الحي (انقطاع الاتصال منتصف
-        // الاستخراج) — ينطبق حتى على مستخدمي unlock غير المقيَّدين بحد الـ30 صفحة.
+        // ملاحظة وقائية تحت الزر: خُفِّض الحد من 30 إلى 20 صفحة (طلب مباشر من المستخدم
+        // بعد فشل حقيقي مؤكَّد على الإنتاج عند 38 صفحة) — ينطبق حتى على مستخدمي unlock
+        // غير المقيَّدين بـ FREE_PAGE_LIMIT نفسه.
         <p className="max-w-sm text-center text-xs text-zinc-500 dark:text-zinc-500">
-          Files over 30 pages may fail to process — please split larger files into parts first.
+          If your file is over {FREE_PAGE_LIMIT} pages, we recommend splitting it into
+          smaller parts first.
         </p>
       )}
       {status === "uploading" && (

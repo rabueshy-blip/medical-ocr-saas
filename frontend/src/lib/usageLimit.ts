@@ -7,7 +7,7 @@ const UNLOCK_CODE = "f835811c4361361504358ed5";
  * كل الجلسات (مُتتبَّع في localStorage للمتصفح — لا يوجد نظام حسابات/تسجيل دخول في
  * الموقع حالياً، فهذا أبسط تتبّع ممكن). قرار مستخدم صريح: يمكن تجاوزه بمسح بيانات
  * المتصفح، مقبول لمرحلة المشروع الحالية. */
-export const FREE_PAGE_LIMIT = 30;
+export const FREE_PAGE_LIMIT = 20;
 
 export function getPagesUsed(): number {
   if (typeof window === "undefined") return 0;
