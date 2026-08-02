@@ -1,8 +1,10 @@
 """تصدير محتوى المحرر (JSON من TipTap، بعد تحرير المترجم) إلى Word/PowerPoint حقيقيَّين
-أو PDF — جداول كجداول حقيقية وليست نصاً مسطَّحاً. الصور **لا** تُضمَّن كبيانات حقيقية
-داخل Word/PowerPoint (انظر `_add_image`) — تُستبدَل بـplaceholder نصي، وتُسلَّم الصورة
-الفعلية في مجلد `images/` ضمن ZIP عند وجود صور (`_stream_with_optional_images`، تُستخدَم
-من `export_docx` و`export_pptx` معاً).
+أو PDF — جداول كجداول حقيقية وليست نصاً مسطَّحاً. الصور تُضمَّن كبيانات حقيقية في مكانها
+الأصلي داخل الملف نفسه (Word/PowerPoint/PDF عبر `attrs.src`، انظر `_add_image`) — قرار
+مُحدَّث (كان placeholder نصي فقط + مجلد `images/` منفصل، طُلب لاحقاً تضمين الصورة
+الفعلية مباشرة). الصورة تُسلَّم أيضاً في مجلد `images/` ضمن ZIP عند وجود صور
+(`_stream_with_optional_images`، تُستخدَم من `export_docx` و`export_pptx` معاً) كنسخة
+إضافية بدقة كاملة لمن يحتاجها منفصلة.
 
 يقبل المحتوى المُحرَّر من الواجهة مباشرة (وليس Document الأصلي من extract-document) عمداً:
 الهدف تصدير النتيجة *بعد* ترجمة/تعديل المترجم، لا النص الخام المُستخرَج.
@@ -19,11 +21,13 @@ import io
 import logging
 import re
 import zipfile
-from typing import List
+from typing import List, Optional
 
 from docx import Document as DocxDocument
+from docx.shared import Inches as DocxInches
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from PIL import Image as PILImage
 from playwright.sync_api import sync_playwright
 from pptx import Presentation
 from pptx.util import Inches
@@ -38,8 +42,9 @@ router = APIRouter(tags=["export"])
 
 class ExportImage(BaseModel):
     """صورة مُستخرَجة أصلاً عبر `extract-document` (`schema.ImageAsset`)، تُرسَل هنا فقط
-    عند التصدير كي تُحزَم في مجلد `images/` داخل ملف ZIP النهائي — راجع توثيق
-    `export_docx` أدناه لسبب عدم تضمين الصورة الحقيقية داخل Word نفسه."""
+    عند التصدير كي تُحزَم أيضاً كنسخة منفصلة في مجلد `images/` داخل ملف ZIP النهائي —
+    الصورة نفسها مُضمَّنة أصلاً في موضعها داخل الملف الأساسي (Word/PDF/PPT) عبر
+    `attrs.src` لعقدة الصورة في محتوى TipTap، انظر `_add_image`."""
 
     image_id: str
     mime_type: str = "image/png"
@@ -115,15 +120,53 @@ def _add_table(doc: DocxDocument, node: dict) -> None:
             col_cursor += colspan
 
 
+_DATA_URL_PATTERN = re.compile(r"^data:[^;]+;base64,(?P<data>.+)$", re.DOTALL)
+
+# عرض معقول لصورة مُضمَّنة في Word/PowerPoint — أكبر من هذا يفيض عادة عن حواف الصفحة/
+# الشريحة، أصغر منه غير مقروء لصورة سريرية (أشعة/جدول ممسوح). الارتفاع يُحسَب تلقائياً
+# بنفس نسبة الأبعاد الأصلية عبر add_picture(width=...) وحدها.
+_EMBEDDED_IMAGE_MAX_WIDTH_INCHES = 5.5
+
+
+def _decode_data_url(src: str) -> Optional[bytes]:
+    """يفكّ base64 من data URL (نفس صيغة `imageAssetSrc` في الواجهة:
+    `data:{mime};base64,{data}`). يُرجع None لأي src غير بصيغة data URL متوقَّعة
+    (رابط خارجي مثلاً) بدل رفع استثناء — العنصر يتدهور إلى placeholder نصي في هذه الحالة."""
+    match = _DATA_URL_PATTERN.match(src or "")
+    if not match:
+        return None
+    try:
+        return base64.b64decode(match.group("data"))
+    except (base64.binascii.Error, ValueError):  # type: ignore[attr-defined]
+        return None
+
+
+def _picture_width_inches(image_bytes: bytes) -> float:
+    """يحسب عرض الإدراج بالإنش: بافتراض 150 DPI (دقة نموذجية لصفحاتنا الممسوحة)
+    مع سقف `_EMBEDDED_IMAGE_MAX_WIDTH_INCHES` — **لا يكبِّر** صورة صغيرة (شعار/أيقونة)
+    فوق حجمها الطبيعي، فقط يمنع صورة ضخمة من الفيضان عن حواف الصفحة/الشريحة."""
+    try:
+        with PILImage.open(io.BytesIO(image_bytes)) as pil_image:
+            pixel_width = pil_image.width
+    except Exception:
+        return _EMBEDDED_IMAGE_MAX_WIDTH_INCHES
+    return min(pixel_width / 150, _EMBEDDED_IMAGE_MAX_WIDTH_INCHES)
+
+
 def _add_image(doc: DocxDocument, node: dict) -> None:
-    """لا تُضمَّن الصورة الحقيقية في ملف Word أبداً (طلب صريح: المترجم يعمل على النص
-    فقط عبر Trados/MateCat، وإدراج الصورة الفعلية مكانها مهمة منفصلة لاحقة لفريق DTP) —
-    بدلاً من ذلك تُكتَب عبارة Placeholder نصية واضحة، بنفس صيغة الـplaceholders التلقائية
-    القادمة أصلاً من `ingest._insert_image_placeholders` (`[Insert Image_XX here]`)، كي
-    يتّسق الشكل بصرف النظر عن كون الصورة أُدرِجَت تلقائياً أو بالسحب اليدوي من مكتبة
-    الوسائط. الصورة الفعلية تُسلَّم بدلاً من ذلك في مجلد `images/` ضمن ملف ZIP التصدير."""
-    image_id = node.get("attrs", {}).get("imageId")
-    doc.add_paragraph(f"[Insert {image_id or 'Image'} here]")
+    """يُضمِّن الصورة الحقيقية في مكانها (طلب مُحدَّث: العميل يريد ملف Word/PDF/PPT جاهزاً
+    بصرياً بالصور في موضعها الأصلي، وليس فقط نصاً للمترجم) — `attrs.src` هو data URL
+    (نفس تنسيق `imageAssetSrc` في الواجهة)، سواء أتى من الـplaceholder التلقائي
+    (`documentToTiptap.ts` يحوّله الآن لعقدة صورة حقيقية) أو من سحب يدوي من مكتبة
+    الوسائط. **تدهور آمن:** src مفقود/غير قابل للفك (حالة غير متوقَّعة) يكتب نفس
+    عبارة الـplaceholder النصي القديمة بدل فشل التصدير بالكامل."""
+    attrs = node.get("attrs", {})
+    image_id = attrs.get("imageId")
+    image_bytes = _decode_data_url(attrs.get("src", ""))
+    if image_bytes is None:
+        doc.add_paragraph(f"[Insert {image_id or 'Image'} here]")
+        return
+    doc.add_picture(io.BytesIO(image_bytes), width=DocxInches(_picture_width_inches(image_bytes)))
 
 
 def _add_pptx_table(prs: Presentation, node: dict) -> None:
@@ -162,12 +205,32 @@ def _add_pptx_table(prs: Presentation, node: dict) -> None:
             col_cursor += colspan
 
 
+def _add_pptx_image(prs: Presentation, image_bytes: bytes) -> None:
+    """صورة على شريحة مستقلة خاصة بها (نفس نمط `_add_pptx_table`) — أبسط وأسلم من
+    محاولة دسّها داخل `placeholders[1]` النصي لتخطيط "Title and Content"، ويضمن
+    محاذاتها ومقاسها داخل حدود الشريحة مهما كانت أبعادها الأصلية."""
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    max_width = prs.slide_width - Inches(0.8)
+    max_height = prs.slide_height - Inches(0.8)
+    try:
+        with PILImage.open(io.BytesIO(image_bytes)) as pil_image:
+            aspect = pil_image.height / pil_image.width if pil_image.width else 1.0
+    except Exception:
+        aspect = 1.0
+    width, height = max_width, int(max_width * aspect)
+    if height > max_height:
+        width, height = int(max_height / aspect) if aspect else max_width, max_height
+    left, top = (prs.slide_width - width) // 2, (prs.slide_height - height) // 2
+    slide.shapes.add_picture(io.BytesIO(image_bytes), left, top, width=width, height=height)
+
+
 def _build_pptx(top_content: List[dict]) -> bytes:
     """يحوّل نفس محتوى TipTap المستخدَم في `export_docx` إلى عرض PowerPoint: كل
     عنوان (heading) يبدأ شريحة جديدة (تخطيط "Title and Content")، والفقرات
     التالية تتراكم كنقاط في مساحة المحتوى لنفس الشريحة حتى العنوان التالي أو
-    الجدول التالي. الجدول يأخذ شريحته المستقلة دوماً (انظر `_add_pptx_table`).
-    الصور بنفس اتفاقية `_add_image`: placeholder نصي فقط، لا تضمين حقيقي.
+    الجدول التالي. الجدول يأخذ شريحته المستقلة دوماً (انظر `_add_pptx_table`)،
+    وكذلك الصورة (انظر `_add_pptx_image`) — تُضمَّن حقيقة إن وُجد `attrs.src`
+    قابل للفك (نفس منطق `_add_image` في Word)، وإلا نص placeholder كتدهور آمن.
 
     **قيد معروف مقبول:** خلافاً لـWord/PDF، الشريحة لا "تفيض" تلقائياً لشريحة
     تالية عند نص طويل جداً — تجاوز عملي غير محلول هنا، الشرائح الفعلية لهذا
@@ -204,8 +267,14 @@ def _build_pptx(top_content: List[dict]) -> bytes:
                 _add_pptx_table(prs, node)
                 current_body = None  # الجدول شريحة مستقلة؛ الفقرة التالية تبدأ شريحة نص جديدة
             elif node_type == "image":
-                image_id = node.get("attrs", {}).get("imageId")
-                append_text(f"[Insert {image_id or 'Image'} here]")
+                attrs = node.get("attrs", {})
+                image_id = attrs.get("imageId")
+                image_bytes = _decode_data_url(attrs.get("src", ""))
+                if image_bytes is None:
+                    append_text(f"[Insert {image_id or 'Image'} here]")
+                else:
+                    _add_pptx_image(prs, image_bytes)
+                    current_body = None  # نفس منطق الجدول: الشريحة النصية التالية تبدأ من جديد
         except Exception as exc:  # عنصر واحد فاشل لا يوقف تصدير بقية العرض
             logger.warning("تعذّر تصدير عنصر PowerPoint من نوع %s: %s", node_type, exc)
 

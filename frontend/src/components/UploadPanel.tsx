@@ -87,12 +87,25 @@ export function UploadPanel() {
 
   return (
     <div className="flex h-full flex-col items-center justify-center gap-4">
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src="/before-after.jpg"
-        alt="Medflow: before and after comparison"
-        className="mb-2 w-full max-w-md rounded-lg"
-      />
+      <div className="mb-2 flex flex-col items-center gap-3 sm:flex-row sm:items-start sm:justify-center">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/before-after.jpg"
+          alt="Medflow: before and after comparison"
+          className="w-full max-w-sm rounded-lg sm:max-w-[240px]"
+        />
+        <div className="flex flex-col items-center gap-2">
+          <p className="text-center text-sm font-medium text-emerald-600 dark:text-emerald-400">
+            New feature added
+          </p>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="/extracted-images-feature.jpg"
+            alt="New feature: extracted images are now included in your downloaded file"
+            className="w-full max-w-sm rounded-lg sm:max-w-[240px]"
+          />
+        </div>
+      </div>
       <p className="text-center text-zinc-700 dark:text-zinc-300">
         Upload Medical report, research, lecture, file, etc.
       </p>
@@ -108,6 +121,14 @@ export function UploadPanel() {
             : "Extracting..."
           : "Try free (Up to 30 pages)"}
       </button>
+      {status !== "uploading" && (
+        // ملاحظة وقائية تحت الزر: 30 صفحة الحد المُختبَر فعلياً كموثوق (قياس حقيقي)،
+        // بينما ملف 38 صفحة حقيقي فشل فعلاً على الإنتاج الحي (انقطاع الاتصال منتصف
+        // الاستخراج) — ينطبق حتى على مستخدمي unlock غير المقيَّدين بحد الـ30 صفحة.
+        <p className="max-w-sm text-center text-xs text-zinc-500 dark:text-zinc-500">
+          Files over 30 pages may fail to process — please split larger files into parts first.
+        </p>
+      )}
       {status === "uploading" && (
         <div className="w-64">
           <div className="h-2 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800">
