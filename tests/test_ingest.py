@@ -250,7 +250,6 @@ class TestExtractDocument(unittest.TestCase):
                 texts, ["Before the chart", "[Insert Image_01 here]", "After the chart"]
             )
 
-    @patch("medical_ocr.ingest._USE_PROCESS_ISOLATION_FOR_SCANNED_PAGES", False)
     @patch("medical_ocr.ingest._scanned_page_blocks_vision", return_value=([], []))
     def test_blank_page_is_routed_to_scanned_ocr_path(self, mock_scanned_blocks):
         # لا نستدعي Google Vision API الحقيقي هنا — فقط نتحقق أن صفحة بلا طبقة نص
@@ -264,7 +263,6 @@ class TestExtractDocument(unittest.TestCase):
             self.assertEqual(document.pages[0].source, PageSource.SCANNED)
             mock_scanned_blocks.assert_called_once()
 
-    @patch("medical_ocr.ingest._USE_PROCESS_ISOLATION_FOR_SCANNED_PAGES", False)
     @patch(
         "medical_ocr.ingest._scanned_page_blocks_vision",
         side_effect=VisionAPIError("500 من الخادم بعد 3 محاولات"),
@@ -1084,7 +1082,6 @@ class TestScannedPageImageExtractionIntegration(unittest.TestCase):
     يجب أن يُستخرَج كل شكل كـImageAsset مستقل، مع Placeholder في مكانه الصحيح بين
     الشكلين والتعليق، تماماً كما يحدث فعلاً للصفحات الرقمية (`_page_images`)."""
 
-    @patch("medical_ocr.ingest._USE_PROCESS_ISOLATION_FOR_SCANNED_PAGES", False)
     @patch("medical_ocr.ingest._call_vision_api")
     def test_two_drawn_shapes_are_extracted_as_separate_images_with_placeholders(self, mock_call_vision_api):
         with tempfile.TemporaryDirectory() as tmp_dir:
