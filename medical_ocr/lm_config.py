@@ -40,5 +40,15 @@ def configure_lm(model: Optional[str] = None, **lm_kwargs) -> dspy.LM:
 
     resolved_model = model or os.getenv("MEDICAL_OCR_LM_MODEL", DEFAULT_MODEL)
     lm = dspy.LM(resolved_model, temperature=0.0, **lm_kwargs)
-    dspy.settings.configure(lm=lm)
+    # **السبب الجذري الفعلي لانهيارات الذاكرة على ملفات كثيرة الصفحات (مُشخَّص فعلياً
+    # عبر سجلّات Render، وليس نظرياً):** `configure_lm()` تُستدعى مرة واحدة فقط عند
+    # إقلاع الخادم (`api/app.py`)، فـ`lm` هنا كائن وحيد يعيش طوال عمر العملية. كل
+    # استدعاء LM حقيقي (`MedicalTableStructurer` لكل جدول ممسوح مكتشَف) يُلحِق نسخة
+    # كاملة من الطلب/الاستجابة الخام في `lm.history` (بلا أي سقف إطلاقاً، خلافاً لـ
+    # `GLOBAL_HISTORY` الداخلية في dspy نفسها المحدودة بـ10000 عنصر) — تتراكم عبر كل
+    # الطلبات منذ إقلاع الخادم، فلا `gc.collect()` ولا `malloc_trim` يُحرّرانها لأنها
+    # ليست قمامة فعلاً، بل مرجوعة حيّة من `lm.history`. `disable_history=True` يوقف
+    # كلا التسجيلين (المحلي وغير المحدود + العالمي المحدود) من الأساس — لا مكان في
+    # الكود يستخدم `dspy.inspect_history()`/`lm.history` فعلياً.
+    dspy.settings.configure(lm=lm, disable_history=True)
     return lm
