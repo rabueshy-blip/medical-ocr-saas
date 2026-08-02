@@ -1,3 +1,13 @@
+---
+title: Medflow API
+emoji: 🏥
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Medical OCR SaaS — استخراج OCR طبي هجين بدون هلوسة
 
 Micro-SaaS يستخرج النصوص والجداول من ملفات PDF الطبية (رقمية أو ممسوحة ضوئياً) بدقة عالية،

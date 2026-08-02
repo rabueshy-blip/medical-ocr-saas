@@ -16,7 +16,10 @@ RUN pip install --no-cache-dir -r requirements-deploy.txt \
 COPY medical_ocr ./medical_ocr
 COPY data ./data
 
-ENV PORT=8000
-EXPOSE 8000
+# 7860 هو المنفذ الافتراضي المتوقَّع من Hugging Face Spaces (Docker SDK) — Render يتجاوز
+# هذا تلقائياً عبر متغيّر PORT الذي يضخّه بنفسه (شُوهد فعلياً 10000 في سجلّاته)، فهذا
+# الافتراضي هنا لا يكسر Render، فقط يطابق منصّة جديدة بلا إعداد إضافي.
+ENV PORT=7860
+EXPOSE 7860
 
 CMD ["sh", "-c", "uvicorn medical_ocr.api.app:app --host 0.0.0.0 --port ${PORT}"]
