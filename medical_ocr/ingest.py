@@ -26,11 +26,14 @@ pdfplumber كما هي).
 from __future__ import annotations
 
 import base64
+import concurrent.futures
+import concurrent.futures.process
 import ctypes
 import ctypes.util
 import gc
 import json
 import logging
+import multiprocessing
 import os
 import random
 import resource
@@ -38,7 +41,7 @@ import statistics
 import time
 from functools import lru_cache
 from io import BytesIO
-from typing import Callable, List, Optional, Set
+from typing import Callable, List, Optional, Set, Tuple
 
 import cv2
 import dspy
@@ -1702,6 +1705,99 @@ def _scanned_page_blocks_vision(
     return blocks, images
 
 
+_SCANNED_PAGE_WORKER_TIMEOUT_SECONDS = 90
+_SPAWN_CONTEXT = multiprocessing.get_context("spawn")
+
+# نقطة تبديل للاختبارات: عملية `spawn` فرعية تفتح استيراداً جديداً تماماً لهذا الموديول،
+# فلا يصلها أي `@patch("medical_ocr.ingest....")` مضبوط في عملية pytest/unittest نفسها —
+# الاختبارات التي تموّه `_call_vision_api`/`_scanned_page_blocks_vision` مباشرة تُعطِّل
+# العزل مؤقتاً عبر `@patch("medical_ocr.ingest._USE_PROCESS_ISOLATION_FOR_SCANNED_PAGES",
+# False)` بدل محاولة تمرير التمويه عبر حدود العمليات (غير ممكن أصلاً). الإنتاج يبقى
+# `True` دوماً بلا أي تغيير.
+_USE_PROCESS_ISOLATION_FOR_SCANNED_PAGES = True
+
+
+def _extract_scanned_page_worker(page_pdf_bytes: bytes, page_number: int, dpi: int) -> Tuple[List[Block], List[ImageAsset]]:
+    """يُشغَّل داخل عملية فرعية منفصلة تماماً (`spawn`، وليس `fork`) لكل صفحة ممسوحة —
+    راجع `_extract_scanned_page_isolated` للسبب. يستقبل بايتات PDF لصفحة واحدة فقط
+    (وليس `fitz.Page` حياً — غير قابل للـpickle عبر حدود العمليات)، ويفتحها من جديد هنا.
+    `configure_lm()` يُعاد استدعاؤه لأن `dspy.settings` حالة خاصة بكل عملية (`spawn` لا
+    يرث ذاكرة العملية الأم إطلاقاً، خلافاً لـ`fork`) — بدونها `_structure_scanned_table_rows`
+    يتدهور بأمان لجدول خام غير مصحَّح بدل الفشل، لكن نفضّل إبقاء التصحيح يعمل."""
+    from .lm_config import configure_lm
+
+    try:
+        configure_lm()
+    except RuntimeError:
+        pass  # بيئة بلا GEMINI_API_KEY (تطوير محلي مثلاً) — نفس تدهور آمن موثَّق أعلاه
+
+    worker_doc = fitz.open(stream=page_pdf_bytes, filetype="pdf")
+    try:
+        return _scanned_page_blocks_vision(worker_doc[0], page_number, dpi)
+    finally:
+        worker_doc.close()
+
+
+def _extract_scanned_page_isolated(
+    fitz_doc: fitz.Document, page_index: int, page_number: int, dpi: int = 200
+) -> Tuple[List[Block], List[ImageAsset]]:
+    """يعزل معالجة صفحة ممسوحة واحدة (رسترة + Vision API + اكتشاف جداول/صور) في عملية
+    فرعية قصيرة العمر تُغلَق تماماً بعد كل صفحة.
+
+    **السبب (مُشخَّص فعلياً عبر Render وليس نظرياً، 2026-08-02):** حتى بعد إصلاح
+    `disable_history` (تسريب حقيقي لكن منفصل) وحتى مع صفحات بحجم واقعي (Letter/A4، ليست
+    الحجم الهائل الخاطئ من اختبار سابق)، ذروة RSS التراكمية للعملية استمرت بالتصاعد صفحة
+    بعد صفحة على حاوية Render (512MB) حتى انهيار OOM صامت حول الصفحة 9-13 من مستند 38
+    صفحة — بينما نفس الملف محلياً (macOS) استقرّ عند ذروة ثابتة بلا أي تصاعد، و`tracemalloc`
+    أثبت أن كائنات Python نفسها **لا تتراكم إطلاقاً** (ذاكرة مُتتبَّعة ثابتة ~1MB طوال
+    التشغيل). الخلاصة: تجزّؤ مخصِّص الذاكرة الأصلي (glibc على حاوية Linux مقيَّدة) بعد دورات
+    متكررة من تخصيص/تحرير كتل كبيرة (بيتماب الصفحة، استجابة Vision JSON) — وليس تسريباً
+    على مستوى Python، ولا يُصلَح فعلياً بـ`malloc_trim`/`gc.collect()` وحدهما (مُجرَّبان
+    مسبقاً هنا، القسم أعلاه). العزل في عملية `spawn` مستقلة يضمن أن نظام التشغيل يستعيد
+    **كامل** ذاكرة تلك الصفحة (بما فيها التجزّؤ غير القابل للاستعادة داخل العملية نفسها)
+    فور انتهائها، فتبقى ذروة ذاكرة العملية الأم شبه ثابتة بصرف النظر عن عدد الصفحات.
+
+    عملية `ProcessPoolExecutor` جديدة تُنشَأ وتُغلَق **لكل صفحة على حدة** عمداً (وليس
+    pool واحد يُعاد استخدامه) — إعادة استخدام نفس العملية الفرعية عبر عدة صفحات تُعيد
+    إنتاج نفس مشكلة التجزّؤ التراكمي داخل تلك العملية نفسها، فقط بعملية واحدة بدل الأصلية.
+    `spawn` (لا `fork`) عمداً: `fork` يرث ذاكرة العملية الأم عبر Copy-on-Write عند لحظة
+    التفرّع، فتبدأ كل عملية فرعية أصلاً من نفس الأساس المرتفع للعملية الأم بدل أساس نظيف —
+    يُفقِد معظم فائدة العزل. تكلفة `spawn` الحقيقية: عملية بايثون جديدة كاملة (استيراد
+    numpy/opencv/Pillow/fitz/requests/dspy من الصفر) لكل صفحة — بضع ثوانٍ إضافية على وحدة
+    معالجة مقيَّدة (0.1 vCPU في خطة Render المجانية)، مقبولة مقابل عدم الانهيار إطلاقاً.
+
+    فشل العملية الفرعية (انهيار OOM لصفحة واحدة تحديداً رغم العزل، أو انتهاء المهلة) يُعامَل
+    كفشل هذه الصفحة فقط (بنفس أسلوب `VisionAPIError` أدناه في `extract_document`) — بقية
+    المستند تكمل بلا تأثر، بدل إسقاط الطلب كاملاً كما كان يحدث سابقاً."""
+    single_page_doc = fitz.open()
+    single_page_doc.insert_pdf(fitz_doc, from_page=page_index, to_page=page_index)
+    page_pdf_bytes = single_page_doc.tobytes()
+    single_page_doc.close()
+
+    try:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=_SPAWN_CONTEXT) as executor:
+            future = executor.submit(_extract_scanned_page_worker, page_pdf_bytes, page_number, dpi)
+            return future.result(timeout=_SCANNED_PAGE_WORKER_TIMEOUT_SECONDS)
+    except VisionAPIError:
+        raise  # يُعامَل في extract_document كما كان تماماً — لا تغيير في هذا المسار
+    except (concurrent.futures.process.BrokenProcessPool, concurrent.futures.TimeoutError) as exc:
+        logger.warning(
+            "فشلت العملية الفرعية المعزولة للصفحة %d (على الأرجح OOM محلي لتلك الصفحة وحدها رغم العزل، أو انتهاء مهلة): %s",
+            page_number, exc,
+        )
+        return (
+            [
+                Block(
+                    block_type=BlockType.PARAGRAPH,
+                    text="[تعذّر استخراج هذه الصفحة تلقائياً — نفدت الذاكرة أثناء معالجتها المعزولة]",
+                    confidence=0.0,
+                    source_engine=SourceEngine.GOOGLE_VISION,
+                )
+            ],
+            [],
+        )
+
+
 def _normalize_header_text(text: str) -> str:
     return " ".join(text.split()).strip().lower()
 
@@ -1870,7 +1966,10 @@ def extract_document(
             else:
                 source = PageSource.SCANNED
                 try:
-                    blocks, page_images = _scanned_page_blocks_vision(fitz_page, index + 1)
+                    if _USE_PROCESS_ISOLATION_FOR_SCANNED_PAGES:
+                        blocks, page_images = _extract_scanned_page_isolated(fitz_doc, index, index + 1, dpi=200)
+                    else:
+                        blocks, page_images = _scanned_page_blocks_vision(fitz_page, index + 1)
                 except VisionAPIError as exc:
                     logger.warning(
                         "فشل استخراج الصفحة %d عبر Google Vision API: %s", index + 1, exc
