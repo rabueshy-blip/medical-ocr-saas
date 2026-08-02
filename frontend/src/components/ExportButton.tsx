@@ -101,7 +101,7 @@ export function ExportButton({ editor }: { editor: Editor | null }) {
           type="button"
           onClick={() => handleExport("docx")}
           disabled={disabled}
-          className="rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-white dark:text-zinc-900"
+          className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50"
         >
           {label("docx", "Export Word")}
         </button>
