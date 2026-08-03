@@ -790,6 +790,39 @@ class TestMergeSplitHeaderRow(unittest.TestCase):
         self.assertEqual(ingest_module._merge_split_header_row([["Only"]]), [["Only"]])
 
 
+class TestLooksLikeSlicedProse(unittest.TestCase):
+    """خلل حقيقي وُصِف من المستخدم بعد رفع ورقة بحثية أكاديمية حقيقية ("كل المستخرَج
+    وضعه في أعمدة"): استراتيجية "text" الاحتياطية خمّنت قائمة المؤلفين والملخص كجدول
+    وهمي 45×6 و63×7 على الصفحات الأولى، بقصّ كلمات حقيقية منتصفها بلا فاصل (مثال حقيقي:
+    "Guido" ← "Gu" و"ido" في عمودين منفصلين) — عدد الأعمدة (6-7) كان أقل من الحد الأقصى
+    الموجود مسبقاً `_TEXT_TABLE_MAX_COLUMNS=8` فلم يُرفَض. `_looks_like_sliced_prose`
+    يكتشف هذا عبر نسبة الحدود التي تنتهي/تبدأ بحرف صغير مباشرة بلا فاصل طبيعي."""
+
+    def test_paragraph_sliced_into_fake_columns_is_detected(self):
+        rows = [
+            ["iovanni Zucchelli,* Gu", "ido Gori,† M", "onica Me", "le,* Martina Stefa"],
+            ["atteo Marzadori,* Luc", "io Montebug", "noli,‡ and", "Massimo De Sa"],
+            ["Background:Ametho", "dtopredeter", "minethem", "aximumroot"],
+        ]
+        self.assertTrue(ingest_module._looks_like_sliced_prose(rows))
+
+    def test_real_lab_results_table_is_not_flagged(self):
+        rows = [
+            ["Test", "Result", "Unit", "Range"],
+            ["Glucose", "95", "mg/dL", "70-99"],
+            ["Potassium", "4.2", "mmol/L", "3.5-5.0"],
+        ]
+        self.assertFalse(ingest_module._looks_like_sliced_prose(rows))
+
+    def test_real_drug_dose_table_is_not_flagged(self):
+        rows = [["Drug", "Dose"], ["Metformin", "500mg"], ["Aspirin", "100mg"]]
+        self.assertFalse(ingest_module._looks_like_sliced_prose(rows))
+
+    def test_empty_rows_are_not_flagged(self):
+        self.assertFalse(ingest_module._looks_like_sliced_prose([]))
+        self.assertFalse(ingest_module._looks_like_sliced_prose([["", ""]]))
+
+
 class TestIsCleanNumericCell(unittest.TestCase):
     def test_plain_number_is_clean(self):
         self.assertTrue(ingest_module._is_clean_numeric_cell("0.870"))

@@ -310,6 +310,34 @@ _MIN_TEXT_TOLERANCE = 1
 # لم يتجاوز 6 أعمدة — 8 هامش أمان فوقها يبقى أدنى بكثير من 10 (الحالة المُهلوَسة).
 _TEXT_TABLE_MAX_COLUMNS = 8
 
+# نسبة الحدود المشبوهة بين خلايا متجاورة (انظر `_looks_like_sliced_prose`) التي تتجاوزها
+# يُرفَض الجدول — جداول بيانات حقيقية اختُبرت عملياً (نتائج مخبرية، جرعات أدوية) كانت
+# دائماً 0.0، بينما فقرة نثر مقصوصة فعلياً (حالة حقيقية: قائمة مؤلفين + ملخص بحث أكاديمي
+# خُمِّنا كجدول 45×6 و63×7) كانت 0.75-0.81 — عتبة 0.3 تترك هامشاً كبيراً في الاتجاهين.
+_SLICED_PROSE_MAX_SUSPICIOUS_RATIO = 0.3
+
+
+def _looks_like_sliced_prose(rows: List[List[str]]) -> bool:
+    """يكتشف جدول "text" وهمياً نشأ عن قصّ فقرة نثر عادية لأعمدة عشوائية — إشارة قوية
+    ومحدَّدة: قيمة خلية حقيقية في جدول بيانات (رقم/دواء/وحدة) نادراً ما تنتهي بحرف صغير
+    مباشرة قبل خلية تالية تبدأ بحرف صغير أيضاً (حد كلمة حقيقي أو رقم يفصلهما عادة)، بينما
+    قصّ فقرة نثر عند حدود أعمدة تخمينية يقطع الكلمات منتصفها بلا فاصل حرفياً (مثال حقيقي:
+    "Guido" ← "Gu" و"ido" في عمودين منفصلين). تُحسَب النسبة عبر كل الحدود بين خلايا
+    متجاورة أفقياً في كل صفوف الجدول؛ تجاوز `_SLICED_PROSE_MAX_SUSPICIOUS_RATIO` يعني
+    نثراً مقصوصاً وليس جدول بيانات حقيقياً."""
+    total = 0
+    suspicious = 0
+    for row in rows:
+        for left, right in zip(row, row[1:]):
+            if not left or not right:
+                continue
+            total += 1
+            if left[-1].isalpha() and left[-1].islower() and right[0].isalpha() and right[0].islower():
+                suspicious += 1
+    if total == 0:
+        return False
+    return (suspicious / total) > _SLICED_PROSE_MAX_SUSPICIOUS_RATIO
+
 
 def _cluster_lines(words: list) -> list:
     """يجمّع كلمات الصفحة (من `extract_words`) في "أسطر" فعلية حسب قرب مركزها
@@ -535,6 +563,13 @@ def _table_blocks(pdfplumber_page) -> List[Block]:
         if not kept:
             continue
         rows, colspans = [r for r, _ in kept], [s for _, s in kept]
+
+        # حارس ثالث لاستراتيجية "text" تحديداً: يرفض جدولاً وهمياً كاملاً نشأ عن قصّ
+        # فقرة نثر عادية (انظر `_looks_like_sliced_prose`) — يلتقط حالات فاتت الحارسين
+        # أعلاه (عدد أعمدة ضمن `_TEXT_TABLE_MAX_COLUMNS` لكن الصفوف/الخلايا نفسها نثر
+        # مقصوص، وليس بالضرورة عدد أعمدة مبالغاً فيه).
+        if used_text_strategy and _looks_like_sliced_prose(rows):
+            continue
 
         normalized_rows = [[cell or "" for cell in row] for row in rows]
         x0, y0, x1, y1 = table.bbox
