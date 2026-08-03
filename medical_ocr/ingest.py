@@ -402,6 +402,54 @@ def _dynamic_text_table_settings(pdfplumber_page) -> dict:
     }
 
 
+# نسبة أدنى لاعتبار جدول خطوط "غير مكتمل الحدود" (وليس فروق تقريب تافهة) — انظر
+# `_widen_incomplete_ruled_table`.
+_RULED_TABLE_WIDEN_MIN_RATIO = 1.05
+
+
+def _widen_incomplete_ruled_table(pdfplumber_page, table):
+    """يوسّع جدول خطوط حقيقية إن كانت حدوده الجانبية أضيق فعلياً من الخطوط الأفقية
+    المحيطة به — نمط حقيقي مُشخَّص في جدول أكاديمي: الخطوط العلوية/السفلية مرسومة
+    بعرض الجدول الكامل، لكن الخطوط الرأسية الداخلية فقط موجودة (بلا حد خارجي أيمن/
+    أيسر)، فيتوقف `pdfplumber` عند آخر خط رأسي مكتشَف بدل الامتداد الفعلي — يفقد
+    عموداً كاملاً بصمت (لا خطأ ولا صف فارغ، الخلايا تختفي تماماً من الإخراج).
+    بالمثل، خط فاصل بين صفّين قد يكون مرسوماً فقط تحت عمود التسمية (ليس بعرض الجدول
+    الكامل)، فتُمرَّر كل الخطوط الأفقية ضمن مدى الجدول صراحةً (`explicit_horizontal_lines`)
+    لضمان فصل الصفوف حتى لو جزئية العرض في المصدر.
+
+    تُعيد الجدول كما هو دون أي تعديل إن لم تكن هناك حاجة للتوسيع — جدول كامل الحدود
+    أصلاً لا يتأثر (حدوده المكتشفة تطابق مدى خطوطه الأفقية فعلياً)، فلا رجعية متوقَّعة
+    على أي جدول خطوط سليم."""
+    x0, y0, x1, y1 = table.bbox
+    tol = 2.0
+    surrounding_h_lines = [
+        line
+        for line in pdfplumber_page.lines
+        if y0 - tol <= line["top"] <= y1 + tol and abs(line["top"] - line["bottom"]) < tol
+    ]
+    if not surrounding_h_lines:
+        return table
+
+    true_x0 = min(line["x0"] for line in surrounding_h_lines)
+    true_x1 = max(line["x1"] for line in surrounding_h_lines)
+    if true_x1 - true_x0 <= (x1 - x0) * _RULED_TABLE_WIDEN_MIN_RATIO:
+        return table
+
+    explicit_horizontal = sorted({round(line["top"], 2) for line in surrounding_h_lines})
+    cropped = pdfplumber_page.crop((true_x0, y0, true_x1, y1))
+    widened = cropped.find_tables(
+        table_settings={
+            "vertical_strategy": "lines",
+            "horizontal_strategy": "lines",
+            "explicit_vertical_lines": [true_x0, true_x1],
+            "explicit_horizontal_lines": explicit_horizontal,
+        }
+    )
+    if not widened or len(widened[0].rows) < len(table.rows):
+        return table
+    return widened[0]
+
+
 def _find_tables(pdfplumber_page) -> tuple[list, bool]:
     """يحاول اكتشاف الجداول أولاً بالإعدادات الافتراضية (تعتمد خطوط شبكة مرسومة فعلياً —
     الأدق حين تكون موجودة)، ثم يلجأ لاستراتيجية `"text"` (محاذاة نصية بلا خطوط) فقط إن
@@ -417,7 +465,8 @@ def _find_tables(pdfplumber_page) -> tuple[list, bool]:
     `_detect_ruled_table_regions` للصفحات الممسوحة)."""
     tables = pdfplumber_page.find_tables()
     if tables:
-        return tables, False
+        widened = [_widen_incomplete_ruled_table(pdfplumber_page, t) for t in tables]
+        return widened, False
     return pdfplumber_page.find_tables(table_settings=_dynamic_text_table_settings(pdfplumber_page)), True
 
 

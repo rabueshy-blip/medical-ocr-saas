@@ -55,6 +55,38 @@ def _make_table_pdf(path: str, rows) -> None:
     doc.close()
 
 
+def _make_incomplete_border_table_pdf(path: str, rows, col_x) -> None:
+    """يبني PDF بجدول خطوط حقيقي **بلا حدود جانبية كاملة** — نمط حقيقي مُشخَّص في
+    مستند أكاديمي فعلي: الخطوط الأفقية (علوي/سفلي/بين الصفوف) تمتد بعرض الجدول
+    الكامل، لكن الخطوط الرأسية الداخلية فقط مرسومة (بلا خط يُغلق الحد الأيسر/الأيمن
+    الخارجي)، وأحد الفواصل الأفقية بين صفّين مرسوم فقط تحت عمود التسمية الأول (ليس
+    بعرض الجدول الكامل) — دون `_widen_incomplete_ruled_table`، `pdfplumber` يتوقف عند
+    آخر خط رأسي مكتشَف فيفقد العمود الأخير والصف الأخير بالكامل بصمت."""
+    doc = fitz.open()
+    page = doc.new_page()
+    row_h = 40
+    y0 = 50
+    full_x0, full_x1 = col_x[0], col_x[-1]
+
+    for r in range(len(rows) + 1):
+        y = y0 + r * row_h
+        if r == 1:
+            # فاصل جزئي فقط تحت عمود التسمية الأول — يحاكي الخط غير المكتمل الحقيقي.
+            page.draw_line((full_x0, y), (col_x[1], y))
+        else:
+            page.draw_line((full_x0, y), (full_x1, y))
+    # خطوط رأسية داخلية فقط — بلا حد خارجي أيسر (col_x[0]) أو أيمن (col_x[-1]).
+    for x in col_x[1:-1]:
+        page.draw_line((x, y0), (x, y0 + len(rows) * row_h))
+
+    for r, row in enumerate(rows):
+        for c, cell in enumerate(row):
+            page.insert_text((col_x[c] + 5, y0 + r * row_h + 20), cell)
+
+    doc.save(path)
+    doc.close()
+
+
 def _make_tight_borderless_table_pdf(path: str, rows, col_x) -> None:
     """يبني PDF بجدول بلا خطوط شبكة (نص مُحاذى بالمواضع فقط، كنتائج مخبرية شائعة) مع
     أعمدة متقاربة جداً عمداً — يستخدم لاختبار أن التفاوت الديناميكي
@@ -215,6 +247,27 @@ class TestExtractDocument(unittest.TestCase):
             _make_tight_borderless_table_pdf(pdf_path, rows, col_x)
 
             document = extract_document(pdf_path, file_name="tight.pdf")
+
+            table_blocks = [b for b in document.pages[0].blocks if b.block_type == BlockType.TABLE]
+            self.assertEqual(len(table_blocks), 1)
+            self.assertEqual(table_blocks[0].rows, rows)
+
+    def test_ruled_table_missing_outer_border_is_widened_to_recover_last_column_and_row(self):
+        # حالة حقيقية مُشخَّصة: مستند طبي أكاديمي فقد عمود "Subtype C" وصف "GRD-III"
+        # بالكامل (بلا خطأ، بصمت) لأن الجدول لم يكن له حدود جانبية خارجية مرسومة —
+        # `pdfplumber` توقف عند آخر خط رأسي داخلي بدل الامتداد الفعلي بعرض الخطوط
+        # الأفقية. انظر `_widen_incomplete_ruled_table`.
+        rows = [
+            ["GRD-I", "Coronally advanced flap", "Bilaminar procedure", "Free graft procedure"],
+            ["GRD-II", "Bilaminar procedure", "Laterally positioned flap", "Tunnel approach"],
+            ["GRD-III", "No root coverage anticipated", "GT augmentation", "AG augmentation"],
+        ]
+        col_x = [50, 150, 300, 430, 560]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pdf_path = os.path.join(tmp_dir, "incomplete_border.pdf")
+            _make_incomplete_border_table_pdf(pdf_path, rows, col_x)
+
+            document = extract_document(pdf_path, file_name="incomplete_border.pdf")
 
             table_blocks = [b for b in document.pages[0].blocks if b.block_type == BlockType.TABLE]
             self.assertEqual(len(table_blocks), 1)
