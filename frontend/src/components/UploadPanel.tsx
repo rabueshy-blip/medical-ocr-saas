@@ -115,11 +115,16 @@ export function UploadPanel() {
         disabled={status === "uploading"}
         className="rounded-lg bg-zinc-900 px-6 py-3 text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-white dark:text-zinc-900"
       >
-        {status === "uploading"
-          ? progress
-            ? `Extracting... (${progress.page}/${progress.total})`
-            : "Extracting..."
-          : `Try free (Up to ${FREE_PAGE_LIMIT} pages)`}
+        {status === "uploading" ? (
+          <span className="flex items-center gap-2">
+            <span className="animate-bounce text-lg" aria-hidden="true">
+              ⏳
+            </span>
+            {progress ? `Extracting... (${progress.page}/${progress.total})` : "Extracting..."}
+          </span>
+        ) : (
+          `Try free (Up to ${FREE_PAGE_LIMIT} pages)`
+        )}
       </button>
       {status !== "uploading" && (
         // ملاحظة وقائية تحت الزر: خُفِّض الحد من 30 إلى 20 صفحة (طلب مباشر من المستخدم
