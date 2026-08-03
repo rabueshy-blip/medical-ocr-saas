@@ -64,9 +64,19 @@ _extra_origins = [
     if origin.strip()
 ]
 
+# CORS_ORIGIN_REGEX (اختياري) يسمح بنطاقات ديناميكية — أهم استخدام: روابط Vercel Preview
+# التي تحمل اسماً عشوائياً مختلفاً لكل نشر (medical-ocr-saas-xxxxx-rabueshy-blips-projects.vercel.app)
+# فلا يمكن إدراجها مسبقاً في CORS_EXTRA_ORIGINS كقائمة ثابتة. الافتراضي يطابق أي preview تحت
+# نفس فريق Vercel الحالي (rabueshy-blips-projects) فقط، وليس أي نطاق vercel.app عشوائي.
+_origin_regex = os.environ.get(
+    "CORS_ORIGIN_REGEX",
+    r"^https://.*-rabueshy-blips-projects\.vercel\.app$",
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", *_extra_origins],
+    allow_origin_regex=_origin_regex,
     allow_methods=["*"],
     allow_headers=["*"],
 )
