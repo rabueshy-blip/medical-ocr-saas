@@ -39,7 +39,14 @@ def configure_lm(model: Optional[str] = None, **lm_kwargs) -> dspy.LM:
         )
 
     resolved_model = model or os.getenv("MEDICAL_OCR_LM_MODEL", DEFAULT_MODEL)
-    lm = dspy.LM(resolved_model, temperature=0.0, **lm_kwargs)
+    # **مشكلة حقيقية مُشخَّصة:** الافتراضي (4000) كان يُقطَع فعلياً على جداول ممسوحة
+    # حقيقية (JSON للتفكير + structured_rows + notes لجدول متعدد الصفوف) — يُفشِل
+    # JSONAdapter التحليل، فيُعاد المحاولة (Refine) بحرارة مختلفة، وكل محاولة فاشلة
+    # هي استدعاء LM إضافي كامل يستهلك من الحصة اليومية الشحيحة أصلاً (5/دقيقة، 20/يوم
+    # على المستوى المجاني) ويُضاعِف زمن الاستخراج الكلي — لوحظ فعلياً 3 محاولات فاشلة
+    # متتالية بسبب القطع قبل نجاح واحدة على ملف DEXA حقيقي.
+    kwargs = {"max_tokens": 8000, **lm_kwargs}
+    lm = dspy.LM(resolved_model, temperature=0.0, **kwargs)
     # **السبب الجذري الفعلي لانهيارات الذاكرة على ملفات كثيرة الصفحات (مُشخَّص فعلياً
     # عبر سجلّات Render، وليس نظرياً):** `configure_lm()` تُستدعى مرة واحدة فقط عند
     # إقلاع الخادم (`api/app.py`)، فـ`lm` هنا كائن وحيد يعيش طوال عمر العملية. كل
