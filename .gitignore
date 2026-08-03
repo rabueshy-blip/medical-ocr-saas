@@ -4,6 +4,9 @@ __pycache__/
 .DS_Store
 pip_install.log
 .env
+env.yaml
 scripts/hard_case_results.json
 scripts/gold_eval_results.json
 scripts/optimized/
+.vercel
+.env*

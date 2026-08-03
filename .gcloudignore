@@ -1,0 +1,15 @@
+.venv/
+frontend/
+tests/
+scripts/
+streamlit_app.py
+requirements.txt
+pip_install.log
+.git/
+.gitignore
+.dockerignore
+*.log
+env.yaml
+.env
+__pycache__/
+*.pyc
